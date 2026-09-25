@@ -52,3 +52,122 @@ def test_analyze_stock_server_error_500():
     outcome = run(call_stock("600519"))
     assert outcome.ok is False
     assert "管道执行失败" in outcome.user_message
+
+async def call_index(symbol: str, timeout: int = 100):
+    client = StockRobotClient(BASE, timeout)
+    try:
+        return await client.analyze_index(symbol, timeout)
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+def test_analyze_index_success():
+    respx.post(f"{BASE}/api/v1/index").mock(
+        return_value=httpx.Response(200, json={"reports": [{"code": "000300"}]})
+    )
+    outcome = run(call_index("000300"))
+    assert outcome.ok is True
+
+
+@respx.mock
+def test_analyze_index_empty_reports():
+    respx.post(f"{BASE}/api/v1/index").mock(
+        return_value=httpx.Response(
+            200, json={"reports": [], "errors": ["无法识别指数 999999"]}
+        )
+    )
+    outcome = run(call_index("999999"))
+    assert outcome.ok is False
+    assert "无法识别指数 999999" in outcome.user_message
+
+
+@respx.mock
+def test_analyze_index_invalid_symbol_422():
+    respx.post(f"{BASE}/api/v1/index").mock(
+        return_value=httpx.Response(422, json={"detail": "无效的指数代码"})
+    )
+    outcome = run(call_index("abc"))
+    assert outcome.ok is False
+    assert "6 位指数代码" in outcome.user_message
+
+
+@respx.mock
+def test_latest_report_id_returns_first():
+    respx.get(f"{BASE}/api/v1/reports").mock(
+        return_value=httpx.Response(
+            200,
+            json={"reports": [{"id": "newest"}, {"id": "older"}], "total": 2},
+        )
+    )
+
+    async def call():
+        client = StockRobotClient(BASE, 100)
+        try:
+            return await client.latest_report_id("stock", "600519", 100)
+        finally:
+            await client.aclose()
+
+    assert run(call()) == "newest"
+
+
+@respx.mock
+def test_latest_report_id_empty_returns_none():
+    respx.get(f"{BASE}/api/v1/reports").mock(
+        return_value=httpx.Response(200, json={"reports": [], "total": 0})
+    )
+
+    async def call():
+        client = StockRobotClient(BASE, 100)
+        try:
+            return await client.latest_report_id("stock", "600519", 100)
+        finally:
+            await client.aclose()
+
+    assert run(call()) is None
+
+
+@respx.mock
+def test_latest_report_id_server_error_returns_none():
+    respx.get(f"{BASE}/api/v1/reports").mock(return_value=httpx.Response(500, text="boom"))
+
+    async def call():
+        client = StockRobotClient(BASE, 100)
+        try:
+            return await client.latest_report_id("stock", "600519", 100)
+        finally:
+            await client.aclose()
+
+    assert run(call()) is None
+
+
+@respx.mock
+def test_download_report_ok():
+    respx.get(f"{BASE}/api/v1/reports/abc/download").mock(
+        return_value=httpx.Response(200, text="# 贵州茅台（600519）分析报告")
+    )
+
+    async def call():
+        client = StockRobotClient(BASE, 100)
+        try:
+            return await client.download_report("abc", 100)
+        finally:
+            await client.aclose()
+
+    assert run(call()) == "# 贵州茅台（600519）分析报告"
+
+
+@respx.mock
+def test_download_report_404_returns_none():
+    respx.get(f"{BASE}/api/v1/reports/abc/download").mock(
+        return_value=httpx.Response(404, json={"detail": "报告不存在"})
+    )
+
+    async def call():
+        client = StockRobotClient(BASE, 100)
+        try:
+            return await client.download_report("abc", 100)
+        finally:
+            await client.aclose()
+
+    assert run(call()) is None

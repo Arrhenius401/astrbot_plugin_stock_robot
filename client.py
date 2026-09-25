@@ -67,6 +67,53 @@ class StockRobotClient:
             "/api/v1/analyze", symbol, effective_timeout, is_index=False
         )
 
+    async def analyze_index(self, symbol: str, effective_timeout: int) -> AnalyzeOutcome:
+        return await self._analyze(
+            "/api/v1/index", symbol, effective_timeout, is_index=True
+        )
+
+    async def latest_report_id(
+        self, kind: ReportKind, query: str, effective_timeout: int
+    ) -> str | None:
+        """定位最新一条报告（报告库按时间倒序，取第一条）；失败返回 None。"""
+        try:
+            resp = await self._http.get(
+                f"{self._base_url}/api/v1/reports",
+                params={"type": kind, "query": query},
+                timeout=effective_timeout,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("报告库查询失败: %s", exc)
+            return None
+        if resp.status_code != 200:
+            logger.warning("报告库查询返回 HTTP %s", resp.status_code)
+            return None
+        try:
+            reports = resp.json().get("reports") or []
+        except ValueError as exc:
+            logger.warning("报告库响应解析失败: %s", exc)
+            return None
+        if not reports:
+            logger.warning("报告库未找到 %s 的报告: %s", kind, query)
+            return None
+        report_id = reports[0].get("id")
+        return str(report_id) if report_id else None
+
+    async def download_report(self, report_id: str, effective_timeout: int) -> str | None:
+        """下载报告 Markdown 原文；失败返回 None。"""
+        try:
+            resp = await self._http.get(
+                f"{self._base_url}/api/v1/reports/{report_id}/download",
+                timeout=effective_timeout,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("报告下载失败: %s", exc)
+            return None
+        if resp.status_code != 200:
+            logger.warning("报告下载返回 HTTP %s", resp.status_code)
+            return None
+        return resp.text
+
     # ------------------------------------------------------------------
     # 内部
 
@@ -118,6 +165,12 @@ class StockRobotClient:
         if not isinstance(data, dict):
             logger.warning("分析响应结构异常: %.200s", resp.text)
             return AnalyzeOutcome(False, "❌ 分析结果异常，已记录日志")
+        
+        # 指数专用校验
+        if is_index and not (data.get("reports") or []):
+            detail = "；".join(str(e) for e in (data.get("errors") or [])) or "无可用结果"
+            logger.warning("指数分析无结果: %s", detail)
+            return AnalyzeOutcome(False, f"❌ 指数分析失败：{detail}")
 
         return AnalyzeOutcome(True)
 
