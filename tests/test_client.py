@@ -3,9 +3,15 @@
 import asyncio
 
 import httpx
+import pytest
 import respx
 
-from client import StockRobotClient
+from client import (
+    StockRobotClient,
+    fallback_image_message,
+    progress_message,
+    resolve_effective_timeout,
+)
 
 BASE = "http://127.0.0.1:25618"
 
@@ -171,3 +177,28 @@ def test_download_report_404_returns_none():
             await client.aclose()
 
     assert run(call()) is None
+
+@pytest.mark.parametrize(
+    ("config_timeout", "tool_timeout", "expected"),
+    [
+        (100, 120, 100),   # 配置值较小 → 取配置值
+        (300, 120, 105),   # 工具超时较小 → 工具超时 − 15
+        (100, None, 100),  # 读不到工具超时 → 回落配置值
+        (100, 20, 10),     # 差值低于下限 → 取下限 10
+        (5, 120, 10),      # 配置值低于下限 → 取下限 10
+    ],
+)
+def test_resolve_effective_timeout(config_timeout, tool_timeout, expected):
+    assert resolve_effective_timeout(config_timeout, tool_timeout) == expected
+
+
+def test_progress_message_contains_symbol_and_timeout():
+    text = progress_message("600519", 100)
+    assert "600519" in text
+    assert "100" in text
+
+
+def test_fallback_image_message_strips_trailing_slash():
+    text = fallback_image_message("http://192.168.1.5:8765/")
+    assert text.endswith("/#report-library")
+    assert "192.168.1.5:8765/#report-library" in text
