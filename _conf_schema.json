@@ -1,0 +1,20 @@
+{
+  "base_url": {
+    "description": "stock_robot 服务地址",
+    "type": "string",
+    "default": "http://127.0.0.1:25618",
+    "hint": "本机运行 stock-robot run 的监听地址；修改后需重载插件"
+  },
+  "web_url": {
+    "description": "报告库链接基址（仅图片生成失败时兜底使用）",
+    "type": "string",
+    "default": "",
+    "hint": "手机访问需填局域网地址，如 http://192.168.1.5:8765；留空则使用 base_url"
+  },
+  "timeout_seconds": {
+    "description": "分析 HTTP 超时上限（秒）",
+    "type": "int",
+    "default": 100,
+    "hint": "运行时与 AstrBot 的 provider_settings.tool_call_timeout 自动收敛取较小值"
+  }
+}
