@@ -59,6 +59,39 @@ def test_analyze_stock_server_error_500():
     assert outcome.ok is False
     assert "管道执行失败" in outcome.user_message
 
+
+@respx.mock
+def test_analyze_stock_timeout():
+    respx.post(f"{BASE}/api/v1/analyze").mock(
+        side_effect=httpx.ReadTimeout("timed out")
+    )
+    outcome = run(call_stock("600519", timeout=42))
+    assert outcome.ok is False
+    assert "42" in outcome.user_message
+    assert "超时" in outcome.user_message
+
+
+@respx.mock
+def test_analyze_stock_connect_error():
+    respx.post(f"{BASE}/api/v1/analyze").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+    outcome = run(call_stock("600519"))
+    assert outcome.ok is False
+    assert "分析服务未启动" in outcome.user_message
+    assert BASE in outcome.user_message
+
+
+@respx.mock
+def test_analyze_stock_malformed_body():
+    respx.post(f"{BASE}/api/v1/analyze").mock(
+        return_value=httpx.Response(200, text="<html>not json</html>")
+    )
+    outcome = run(call_stock("600519"))
+    assert outcome.ok is False
+    assert "分析结果异常" in outcome.user_message
+
+
 async def call_index(symbol: str, timeout: int = 100):
     client = StockRobotClient(BASE, timeout)
     try:
