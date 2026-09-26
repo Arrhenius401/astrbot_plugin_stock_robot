@@ -33,18 +33,13 @@ class StockRobotPlugin(Star):
         )
         self._client = StockRobotClient(base_url, self._timeout_seconds)
 
-    async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
-
     async def terminate(self):
-        """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
         """插件卸载/停用时关闭 HTTP 客户端。"""
         await self._client.aclose()
 
     # ------------------------------------------------------------------
     # LLM 工具
 
-    # 注册指令的装饰器。注册进 AstrBot 的全局工具表后，LLM在对话时能看到它（名称+描述+参数），自行决定调用，框架再执行你写的方法。
     @filter.llm_tool(name="analyze_stock")
     async def analyze_stock(self, event: AstrMessageEvent, symbol: str):
         """分析一只 A 股个股，并把完整研报以图片发送给用户。
@@ -55,8 +50,8 @@ class StockRobotPlugin(Star):
             symbol(string): 6 位股票代码，例如 600519
         """
         note: list[str] = []
-        async for result in self._run_analysis(event, "stock", symbol, note):
-            yield result
+        await self._run_analysis(event, "stock", symbol, note)
+        return note[-1] if note else "分析流程已结束。"
 
     @filter.llm_tool(name="analyze_index")
     async def analyze_index(self, event: AstrMessageEvent, symbol: str):
@@ -68,8 +63,8 @@ class StockRobotPlugin(Star):
             symbol(string): 6 位指数代码，例如 000300、399006
         """
         note: list[str] = []
-        async for result in self._run_analysis(event, "index", symbol, note):
-            yield result
+        await self._run_analysis(event, "index", symbol, note)
+        return note[-1] if note else "分析流程已结束。"
 
     # ------------------------------------------------------------------
     # 流程与辅助
@@ -96,20 +91,22 @@ class StockRobotPlugin(Star):
         kind: ReportKind,
         symbol: str,
         note: list[str],
-    ):
+    ) -> None:
         """执行分析流程：进度 → 分析 → 报告取回 → 图片发送；失败走兜底。
 
-        通过 note 列表回传终态说明（生成器无法 return 值）。
+        消息一律用 `await event.send(...)` 显式发送，不用生成器 yield：
+        AstrBot 的权限代理（_PermissionGuardedTool）会完整消费插件的异步生成器，
+        并且只保留最后一个 yield，多段 yield 会被静默丢弃。
         """
         effective_timeout = self._resolve_effective_timeout(event)
-        yield event.plain_result(progress_message(symbol, effective_timeout))
+        await event.send(event.plain_result(progress_message(symbol, effective_timeout)))
 
         if kind == "stock":
             outcome = await self._client.analyze_stock(symbol, effective_timeout)
         else:
             outcome = await self._client.analyze_index(symbol, effective_timeout)
         if not outcome.ok:
-            yield event.plain_result(outcome.user_message)
+            await event.send(event.plain_result(outcome.user_message))
             note.append("分析失败，已直接告知用户失败原因，请勿编造分析内容。")
             return
 
@@ -121,7 +118,7 @@ class StockRobotPlugin(Star):
         )
         if markdown is None:
             logger.warning("报告定位或下载失败: kind=%s symbol=%s", kind, symbol)
-            yield event.plain_result(fallback_image_message(self._web_url))
+            await event.send(event.plain_result(fallback_image_message(self._web_url)))
             note.append("报告图片生成失败，已向用户发送兜底链接。")
             return
 
@@ -131,9 +128,9 @@ class StockRobotPlugin(Star):
             logger.warning("报告转图失败", exc_info=True)
             url = ""
         if not url:
-            yield event.plain_result(fallback_image_message(self._web_url))
+            await event.send(event.plain_result(fallback_image_message(self._web_url)))
             note.append("报告图片生成失败，已向用户发送兜底链接。")
             return
 
-        yield event.image_result(url)
+        await event.send(event.image_result(url))
         note.append("报告图片已直接发送给用户，请勿重复输出内容，用一句话简短收尾。")
