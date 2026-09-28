@@ -51,7 +51,7 @@ class StockRobotPlugin(Star):
         """
         note: list[str] = []
         await self._run_analysis(event, "stock", symbol, note)
-        return note[-1] if note else "分析流程已结束。"
+        return note[-1] if note else "流程已结束。只回一句简短确认，不要再调用工具。"
 
     @filter.llm_tool(name="analyze_index")
     async def analyze_index(self, event: AstrMessageEvent, symbol: str):
@@ -64,7 +64,7 @@ class StockRobotPlugin(Star):
         """
         note: list[str] = []
         await self._run_analysis(event, "index", symbol, note)
-        return note[-1] if note else "分析流程已结束。"
+        return note[-1] if note else "流程已结束。只回一句简短确认，不要再调用工具。"
 
     # ------------------------------------------------------------------
     # 流程与辅助
@@ -107,7 +107,7 @@ class StockRobotPlugin(Star):
             outcome = await self._client.analyze_index(symbol, effective_timeout)
         if not outcome.ok:
             await event.send(event.plain_result(outcome.user_message))
-            note.append("分析失败，已直接告知用户失败原因，请勿编造分析内容。")
+            note.append("分析失败，原因已直接发给用户。只回一句简短确认，不要编造分析内容，不要再调用工具。")
             return
 
         report_id = await self._client.latest_report_id(kind, symbol, effective_timeout)
@@ -119,7 +119,7 @@ class StockRobotPlugin(Star):
         if markdown is None:
             logger.warning("报告定位或下载失败: kind=%s symbol=%s", kind, symbol)
             await event.send(event.plain_result(fallback_image_message(self._web_url)))
-            note.append("报告图片生成失败，已向用户发送兜底链接。")
+            note.append("报告图片生成失败，兜底链接已发给用户。只回一句简短确认，不要再调用工具。")
             return
 
         try:
@@ -129,8 +129,8 @@ class StockRobotPlugin(Star):
             url = ""
         if not url:
             await event.send(event.plain_result(fallback_image_message(self._web_url)))
-            note.append("报告图片生成失败，已向用户发送兜底链接。")
+            note.append("报告图片生成失败，兜底链接已发给用户。只回一句简短确认，不要再调用工具。")
             return
 
         await event.send(event.image_result(url))
-        note.append("报告图片已直接发送给用户，请勿重复输出内容，用一句话简短收尾。")
+        note.append("报告图片已直接发给用户。只回一句简短确认（如“报告已发出”），不要复述报告内容，不要再调用工具。")
