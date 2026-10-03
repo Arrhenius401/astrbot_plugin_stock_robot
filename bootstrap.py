@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import ctypes
 import hashlib
 import json
@@ -246,19 +247,26 @@ async def run_command(cmd: list[str], cwd: Path, *, log_path: Path) -> tuple[int
         # 分块而非 readline，避免无换行安装输出超过 StreamReader 上限。
         with log_path.open("a", encoding="utf-8") as output:
             pending = ""
+            dropping = False
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             while chunk := await process.stdout.read(4096):
-                pending += chunk.decode("utf-8", errors="replace")
+                pending += decoder.decode(chunk)
                 while "\n" in pending or len(pending) > 8192:
                     line, separator, remaining = pending.partition("\n")
                     if not separator:
-                        line, remaining = pending[:8192], pending[8192:]
+                        # 不拆开超长行，否则凭据前缀与值分离后可能绕过脱敏。
+                        pending = ""
+                        dropping = True
+                        break
                     pending = remaining
-                    safe = redact(line)
+                    safe = "[过长安装日志行已略去]" if dropping or len(line) > 8192 else redact(line)
+                    dropping = False
                     output.write(safe + "\n")
                     output.flush()
                     tail.append(safe)
-            if pending:
-                safe = redact(pending)
+            pending += decoder.decode(b"", final=True)
+            if pending or dropping:
+                safe = "[过长安装日志行已略去]" if dropping else redact(pending)
                 output.write(safe + "\n")
                 tail.append(safe)
             await process.wait()

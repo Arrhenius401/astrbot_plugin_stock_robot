@@ -137,7 +137,8 @@ async def test_cancel_command_reaps_child(tmp_path, monkeypatch, cancel):
     "Authorization: Bearer dummy-review-secret",
     '{"api_key":"dummy-review-secret"}',
     "password = 'dummy-review-secret with spaces'",
-])
+    "x" * 8180 + '{"api_key": "dummy-review-secret"}' + "y" * 10000,
+], ids=["bearer", "json", "spaces", "oversized"])
 async def test_command_log_and_tail_redact_credentials(tmp_path, output):
     path = tmp_path / "service.log"
     code, tail = await bootstrap.run_command(
