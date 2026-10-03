@@ -6,8 +6,8 @@ desc: |
   用户询问某只股票或指数时，插件调用本机部署的 stock_robot 服务完成分析，
   并把完整研报渲染为图片直接发送。
 
-  前置条件：自行部署并常驻运行 stock_robot 服务（见 README）。
-version: 0.1.0
+  支持复用已有服务，或在本机回环地址后台准备独立服务（见 README）。
+version: 1.1.0
 author: Arrhenius401
 repo: https://github.com/Arrhenius401/astrbot_plugin_stock_robot
 astrbot_version: ">=4.27,<5"  # 开发与验证基线 4.27.4

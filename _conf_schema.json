@@ -3,7 +3,7 @@
     "description": "stock_robot 服务地址",
     "type": "string",
     "default": "http://127.0.0.1:25618",
-    "hint": "本机运行 stock-robot run 的监听地址；修改后需重载插件"
+    "hint": "回环 HTTP 地址可自动准备服务；其他地址仅复用；修改后需重载插件"
   },
   "web_url": {
     "description": "报告库链接基址（仅图片生成失败时兜底使用）",
@@ -16,5 +16,21 @@
     "type": "int",
     "default": 100,
     "hint": "运行时与 AstrBot 的 provider_settings.tool_call_timeout 自动收敛取较小值"
+  },
+  "startup_timeout_seconds": {
+    "description": "等待服务启动上限（秒）", "type": "int", "default": 60,
+    "hint": "安装在后台继续；本次等待还受 AstrBot 工具剩余时间限制"
+  },
+  "auto_install": {
+    "description": "自动准备本机服务", "type": "bool", "default": true,
+    "hint": "关闭后只复用已运行服务，不安装也不启动已有实例"
+  },
+  "bootstrap_extras": {
+    "description": "可选依赖", "type": "string", "default": "",
+    "hint": "留空安装核心依赖；rag 另装检索依赖；修改后重载会补装，改回核心不自动卸载旧 RAG 包"
+  },
+  "source_archive_url": {
+    "description": "固定版本源码归档", "type": "string", "default": "",
+    "hint": "须包含锁定安装清单；当前尚未内置已验收版本，冷安装需填写固定提交或标签的 ZIP 地址"
   }
 }
