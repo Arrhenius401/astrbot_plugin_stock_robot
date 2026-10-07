@@ -36,6 +36,61 @@ def archive(member="project/pyproject.toml"):
 
 
 @pytest.mark.asyncio
+async def test_default_latest_release_records_tag_and_reuses_offline(tmp_path, monkeypatch):
+    requests = []
+    def respond(request):
+        requests.append(str(request.url))
+        if str(request.url).endswith('/releases/latest'):
+            return httpx.Response(200, json={"tag_name": "v0.2.0", "id": 42,
+                                           "draft": False, "prerelease": False})
+        assert str(request.url).endswith('/zipball/v0.2.0')
+        return httpx.Response(200, content=archive())
+    original = httpx.AsyncClient
+    monkeypatch.setattr(bootstrap.httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(respond), **kw))
+    assert (await bootstrap.download_source(None, tmp_path)).ok
+    info = json.loads((tmp_path / 'src/.bootstrap-source.json').read_text())
+    assert info['release_tag'] == 'v0.2.0'
+    assert info['release_id'] == 42
+    assert len(info['archive_sha256']) == 64
+    assert (await bootstrap.download_source(None, tmp_path)).ok
+    assert len(requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status,body,reason', [
+    (404, {}, '尚无正式发布'), (403, {}, '403'),
+    (200, {'tag_name':'v1','id':1,'draft':False,'prerelease':True}, '正式'),
+    (200, {'tag_name':'','id':1,'draft':False,'prerelease':False}, '标签'),
+    (200, [], '响应'),
+])
+async def test_latest_release_errors_leave_no_source(tmp_path, monkeypatch, status, body, reason):
+    original = httpx.AsyncClient
+    monkeypatch.setattr(bootstrap.httpx, 'AsyncClient', lambda **kw: original(
+        transport=httpx.MockTransport(lambda _: httpx.Response(status, json=body)), **kw))
+    result = await bootstrap.download_source(None, tmp_path)
+    assert not result.ok
+    assert reason in result.detail
+    assert not (tmp_path / 'src').exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('extras', ['', 'rag'])
+async def test_required_lock_missing_does_not_publish_source(tmp_path, monkeypatch, extras):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output,'w') as bundle:
+        bundle.writestr('project/pyproject.toml','[project]')
+        if extras == 'rag':
+            bundle.writestr('project/requirements-core.lock.txt','')
+    original = httpx.AsyncClient
+    monkeypatch.setattr(bootstrap.httpx, 'AsyncClient', lambda **kw: original(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, content=output.getvalue())), **kw))
+    result = await bootstrap.download_source('https://example.org/source.zip', tmp_path, extras=extras)
+    assert not result.ok
+    assert '锁' in result.detail
+    assert not (tmp_path / 'src').exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("member,ok", [("project/pyproject.toml", True), ("../pyproject.toml", False), ("/pyproject.toml", False), ("symlink", False), ("project/C:escape", False), ("project/.. /escape", False), ("project/CON", False)])
 async def test_archive_publication(tmp_path, monkeypatch, member, ok):
     transport = httpx.MockTransport(lambda request: httpx.Response(200, content=archive(member)))

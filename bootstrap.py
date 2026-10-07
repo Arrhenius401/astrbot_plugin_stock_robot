@@ -22,12 +22,15 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import yaml
 
 logger = logging.getLogger(__name__)
 DEFAULT_ARCHIVE_URL: str | None = None
+RELEASE_API_URL = "https://api.github.com/repos/Arrhenius401/stock_robot/releases/latest"
+SOURCE_API_URL = "https://api.github.com/repos/Arrhenius401/stock_robot/zipball/"
 INSTALL_TIMEOUT_SECONDS = 1200
 DOWNLOAD_TIMEOUT_SECONDS = 300
 Runner = Callable[[list[str], Path], Awaitable[tuple[int, str]]]
@@ -284,7 +287,7 @@ async def run_command(cmd: list[str], cwd: Path, *, log_path: Path) -> tuple[int
     return process.returncode or 0, "\n".join(tail)
 
 
-def _source_info(instance: Path) -> dict[str, str] | None:
+def _source_info(instance: Path) -> dict[str, Any] | None:
     try:
         info = json.loads((instance / "src/.bootstrap-source.json").read_text("utf-8"))
     except (OSError, ValueError):
@@ -338,37 +341,66 @@ def _extract(bundle_path: Path, target: Path) -> None:
             raise ValueError("归档缺少 pyproject.toml")
 
 
-async def download_source(archive_url: str | None, instance: Path) -> StepResult:
+async def _latest_release(client: httpx.AsyncClient) -> tuple[str, dict[str, Any]]:
+    """只解析正式Release，后续下载锁定到本次返回的标签。"""
+    response = await client.get(RELEASE_API_URL, headers={"Accept": "application/vnd.github+json"})
+    if response.status_code == 404:
+        raise ValueError("stock_robot尚无正式发布版本，请等待发布或填写固定源码归档地址")
+    response.raise_for_status()
+    release = response.json()
+    if not isinstance(release, dict):
+        raise TypeError("正式发布查询响应格式无效")
+    if release.get("draft") is not False or release.get("prerelease") is not False:
+        raise ValueError("返回版本不是正式发布版本")
+    tag = release.get("tag_name")
+    release_id = release.get("id")
+    if not isinstance(tag, str) or not tag.strip():
+        raise ValueError("正式发布版本标签缺失")
+    if type(release_id) is not int or release_id <= 0:
+        raise ValueError("正式发布版本记录无效")
+    return SOURCE_API_URL + quote(tag, safe=""), {"release_tag": tag, "release_id": release_id}
+
+
+async def download_source(archive_url: str | None, instance: Path, *, extras: str = "") -> StepResult:
     if _source_info(instance):
         return StepResult(True, "复用已校验源码")
     if (instance / "src").exists():
         return StepResult(False, "现有源码缺少有效来源记录，请停用后移除 src 再重试")
-    if not archive_url:
-        return StepResult(False, "尚无已验收默认归档，请配置固定源码归档地址")
     try:
         instance.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".bootstrap-", dir=instance) as directory:
             temporary = Path(directory)
             archive = temporary / "source.zip"
             digest = hashlib.sha256()
+            release_info: dict[str, Any] = {}
             async with (
                 asyncio.timeout(DOWNLOAD_TIMEOUT_SECONDS),
                 httpx.AsyncClient(timeout=30, follow_redirects=True) as client,
-                client.stream("GET", archive_url) as response,
             ):
-                response.raise_for_status()
-                with archive.open("wb") as output:
-                    async for chunk in response.aiter_bytes():
-                        digest.update(chunk)
-                        output.write(chunk)
+                if not archive_url:
+                    archive_url, release_info = await _latest_release(client)
+                    logger.info("准备安装stock_robot正式版：%s", release_info["release_tag"])
+                async with client.stream("GET", archive_url) as response:
+                    response.raise_for_status()
+                    with archive.open("wb") as output:
+                        async for chunk in response.aiter_bytes():
+                            digest.update(chunk)
+                            output.write(chunk)
             unpacked = temporary / "unpacked"
             _extract(archive, unpacked)
             source = next(unpacked.iterdir())
-            _write_json(source / ".bootstrap-source.json", {"archive_url": archive_url, "archive_sha256": digest.hexdigest()})
+            required = ["requirements-core.lock.txt"]
+            if extras == "rag":
+                required.append("requirements-rag.lock.txt")
+            if any(not (source / name).is_file() for name in required):
+                raise ValueError("源码归档缺少所需锁定依赖清单")
+            _write_json(source / ".bootstrap-source.json", {
+                "archive_url": archive_url, "archive_sha256": digest.hexdigest(), **release_info,
+            })
             source.replace(instance / "src")
         logger.info("自举源码下载完成：%s", redact(archive_url))
         return StepResult(True)
-    except (httpx.HTTPError, TimeoutError, OSError, ValueError, zipfile.BadZipFile, NotImplementedError, RuntimeError) as exc:
+    except (httpx.HTTPError, TimeoutError, OSError, ValueError, TypeError, zipfile.BadZipFile, NotImplementedError, RuntimeError) as exc:
         logger.warning("源码准备失败：%s", redact(str(exc)))
         return StepResult(False, f"源码准备失败：{redact(str(exc))}")
 
@@ -447,7 +479,7 @@ async def ensure_instance(instance: Path, archive_url: str | None, extras: str, 
         return StepResult(True)
     try:
         async with asyncio.timeout(INSTALL_TIMEOUT_SECONDS):
-            result = await download_source(archive_url, instance)
+            result = await download_source(archive_url, instance, extras=extras)
             if not result.ok:
                 return result
             result = await make_env(instance, extras, runner=runner)

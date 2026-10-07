@@ -30,7 +30,7 @@
     "hint": "留空安装核心依赖；rag 另装检索依赖；修改后重载会补装，改回核心不自动卸载旧 RAG 包"
   },
   "source_archive_url": {
-    "description": "固定版本源码归档", "type": "string", "default": "",
-    "hint": "须包含锁定安装清单；当前尚未内置已验收版本，冷安装需填写固定提交或标签的 ZIP 地址"
+    "description": "自定义源码归档（可选）", "type": "string", "default": "",
+    "hint": "留空获取stock_robot最新正式发布版；填写则使用固定提交或标签ZIP，须包含锁清单；已有安装不会因重载或改地址自动升级"
   }
 }

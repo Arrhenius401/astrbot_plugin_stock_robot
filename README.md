@@ -8,7 +8,9 @@
 
 默认地址为 `http://127.0.0.1:25618`。本机回环 HTTP 地址（localhost、127.0.0.1、::1，且没有路径前缀）可自动安装、启动独立服务。其他地址只复用，不在远端安装。`auto_install=false` 时也只复用，不会启动已有但停止的实例。
 
-**当前还未内置已验收的公开归档。** 冷安装需要填写 `source_archive_url`，使用固定提交或标签的 ZIP 地址，包含 `pyproject.toml` 和 `requirements-core.lock.txt`；启用 RAG 时还需要 `requirements-rag.lock.txt`。不能用持续变化的 main.zip。未填写时会明确提示，已有健康服务仍可使用。公开固定归档验收后再设置内置默认值。
+首次安装时，`source_archive_url` 留空会查询 stock_robot 最新正式 GitHub Release（不含草稿或预发布），解析标签后下载该固定标签的源码 ZIP。插件不与服务版本绑定，stock_robot 应保持插件所用 API 向后兼容。已有有效源码优先复用，普通重载不会查询或升级服务。
+
+也可填写自定义固定提交或标签 ZIP 地址；归档须包含 `pyproject.toml` 和 `requirements-core.lock.txt`，启用 RAG 时另需 `requirements-rag.lock.txt`。不建议使用持续变化的 main.zip。没有正式 Release、网络或限流错误、归档不完整时明确失败，不自动退回开发分支。2026-10-07 验证时公开仓库尚无 Release，默认冷安装需等待首个正式发布；已有安装及自定义归档仍可使用。
 
 安装优先使用 uv，否则使用 Python venv/pip；按带哈希的锁清单安装依赖，再以 `--no-deps` 安装源码。`bootstrap_extras` 留空只装核心依赖，填写 `rag` 安装检索依赖，其他值不接受。RAG 体积较大，首次安装可能超过聊天工具的等待时间。
 
@@ -28,7 +30,7 @@
 | startup_timeout_seconds | 60 | 单次等待服务就绪的上限，不代表安装总时限 |
 | auto_install | true | 允许本机自动准备；false 仅复用 |
 | bootstrap_extras | 空 | 空或 rag |
-| source_archive_url | 空 | 已验收的固定源码归档 |
+| source_archive_url | 空 | 留空获取最新正式发布版；可覆盖为自定义固定归档 |
 
 准备、分析、取报告和图片渲染共用本次工具时间。等待超时会给出重试提示，后台安装继续；并发调用共用一个准备任务。停用时先取消并等待准备任务，再回收插件创建的进程。
 
@@ -52,7 +54,9 @@ instance/
 
 修改 extras 后重载插件，会按对应锁清单补装依赖并更新安装标记；改回核心模式不会自动卸载原有 RAG 包。修改归档地址不会自动升级现有源码。
 
-手工重装或升级时，先停用插件、确认自建进程已退出并备份数据。只移除 `instance/src`、`instance/venv`、`instance/install-state.json` 后重新启用。保留 `.stock_robot`、`reports` 和其他用户数据，不删除整个 instance。
+自动下载的正式版标签和Release编号记录在 `instance/src/.bootstrap-source.json`，同一来源记录写入 `install-state.json`，并在安装日志中显示标签。SHA256记录实际下载内容，不代表发布方签名或预期摘要校验；自定义归档仅记录地址和摘要，不推断版本号。
+
+主动重装或升级时，先停用插件、确认自建进程已退出并备份数据。只移除 `instance/src`、`instance/venv`、`instance/install-state.json` 后重新启用。保留 `.stock_robot`、`reports` 和其他用户数据，不删除整个 instance。归档地址留空将重新获取当时最新正式版；设置自定义地址则安装指定归档。自行部署、插件仅连接的服务由用户自行升级。
 
 日志会隐藏常见凭据，仍应限制数据目录的访问权限。Windows 的文件模式设置不能代替 ACL。
 
