@@ -12,3 +12,8 @@ api = ModuleType("astrbot.api")
 api.logger = logging.getLogger("plugin-test")
 sys.modules["astrbot"] = ModuleType("astrbot")
 sys.modules["astrbot.api"] = api
+
+# 按包加载客户端，保持与 AstrBot 插件的相对导入语义一致。
+package = ModuleType("stock_robot_plugin_test")
+package.__path__ = [str(Path(__file__).resolve().parent.parent)]
+sys.modules[package.__name__] = package

@@ -8,6 +8,8 @@ from typing import Literal
 import httpx
 from astrbot.api import logger
 
+from .bootstrap import redact
+
 DEFAULT_BASE_URL = "http://127.0.0.1:25618"
 DEFAULT_TIMEOUT_SECONDS = 100
 TIMEOUT_MARGIN = 15
@@ -81,20 +83,32 @@ class StockRobotClient:
                 timeout=effective_timeout,
             )
         except httpx.HTTPError as exc:
-            logger.warning("报告库查询失败: %s", exc)
+            logger.warning("报告库查询失败: %s", redact(str(exc)))
             return None
         if resp.status_code != 200:
             logger.warning("报告库查询返回 HTTP %s", resp.status_code)
             return None
         try:
-            reports = resp.json().get("reports") or []
+            payload = resp.json()
         except ValueError as exc:
-            logger.warning("报告库响应解析失败: %s", exc)
+            logger.warning("报告库响应解析失败: %s", redact(str(exc)))
+            return None
+        if not isinstance(payload, dict):
+            logger.warning("报告库响应结构异常")
+            return None
+        reports = payload.get("reports")
+        if reports is None:
+            reports = []
+        if not isinstance(reports, list) or any(not isinstance(item, dict) for item in reports):
+            logger.warning("报告库列表结构异常")
             return None
         if not reports:
             logger.warning("报告库未找到 %s 的报告: %s", kind, query)
             return None
         report_id = reports[0].get("id")
+        if not isinstance(report_id, (str, int)) or isinstance(report_id, bool):
+            logger.warning("报告库报告标识无效")
+            return None
         return str(report_id) if report_id else None
 
     async def download_report(self, report_id: str, effective_timeout: int) -> str | None:
@@ -105,7 +119,7 @@ class StockRobotClient:
                 timeout=effective_timeout,
             )
         except httpx.HTTPError as exc:
-            logger.warning("报告下载失败: %s", exc)
+            logger.warning("报告下载失败: %s", redact(str(exc)))
             return None
         if resp.status_code != 200:
             logger.warning("报告下载返回 HTTP %s", resp.status_code)
@@ -134,9 +148,9 @@ class StockRobotClient:
                 "首次分析需拉取数据较慢，可稍后重试或调大插件超时配置",
             )
         except httpx.HTTPError as exc:
-            logger.warning("无法连接分析服务 %s: %s", self._base_url, exc)
+            logger.warning("无法连接分析服务 %s: %s", redact(self._base_url), redact(str(exc)))
             return AnalyzeOutcome(
-                False, f"❌ 分析服务未启动（{self._base_url}），请先运行 stock-robot run"
+                False, f"❌ 分析服务未启动（{redact(self._base_url)}），请先运行 stock-robot run"
             )
 
         if resp.status_code == 422:
@@ -157,16 +171,18 @@ class StockRobotClient:
         try:
             data = resp.json()
         except ValueError as exc:
-            logger.warning("分析响应不是有效 JSON: %s（正文 %.200s）", exc, resp.text)
+            logger.warning("分析响应不是有效 JSON: %s（正文 %.200s）", redact(str(exc)), redact(resp.text)[:200])
             return AnalyzeOutcome(False, "❌ 分析结果异常，已记录日志")
 
         if not isinstance(data, dict):
-            logger.warning("分析响应结构异常: %.200s", resp.text)
+            logger.warning("分析响应结构异常: %.200s", redact(resp.text)[:200])
             return AnalyzeOutcome(False, "❌ 分析结果异常，已记录日志")
         
         # 指数专用校验
         if is_index and not (data.get("reports") or []):
-            detail = "；".join(str(e) for e in (data.get("errors") or [])) or "无可用结果"
+            errors = data.get("errors") or []
+            detail = "；".join(str(e) for e in errors) if isinstance(errors, list) else str(errors)
+            detail = redact(detail)[:200] or "无可用结果"
             logger.warning("指数分析无结果: %s", detail)
             return AnalyzeOutcome(False, f"❌ 指数分析失败：{detail}")
 
@@ -177,8 +193,8 @@ class StockRobotClient:
         try:
             payload = resp.json()
         except ValueError:
-            return resp.text[:200] or f"HTTP {resp.status_code}"
+            return redact(resp.text)[:200] or f"HTTP {resp.status_code}"
         if not isinstance(payload, dict):
-            return resp.text[:200] or f"HTTP {resp.status_code}"
+            return redact(resp.text)[:200] or f"HTTP {resp.status_code}"
         detail = payload.get("detail") or payload.get("error")
-        return str(detail)[:200] if detail else f"HTTP {resp.status_code}"
+        return redact(str(detail))[:200] if detail else f"HTTP {resp.status_code}"
