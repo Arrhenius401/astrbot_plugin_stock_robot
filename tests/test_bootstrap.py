@@ -43,7 +43,7 @@ async def test_default_latest_release_records_tag_and_reuses_offline(tmp_path, m
         if str(request.url).endswith('/releases/latest'):
             return httpx.Response(200, json={"tag_name": "v0.2.0", "id": 42,
                                            "draft": False, "prerelease": False})
-        assert str(request.url).endswith('/zipball/v0.2.0')
+        assert str(request.url) == 'https://codeload.github.com/Arrhenius401/stock_robot/zip/refs/tags/v0.2.0'
         return httpx.Response(200, content=archive())
     original = httpx.AsyncClient
     monkeypatch.setattr(bootstrap.httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(respond), **kw))
@@ -51,8 +51,72 @@ async def test_default_latest_release_records_tag_and_reuses_offline(tmp_path, m
     info = json.loads((tmp_path / 'src/.bootstrap-source.json').read_text())
     assert info['release_tag'] == 'v0.2.0'
     assert info['release_id'] == 42
+    assert info['release_resolution'] == 'api'
     assert len(info['archive_sha256']) == 64
     assert (await bootstrap.download_source(None, tmp_path)).ok
+    assert len(requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status,headers,body', [
+    (429, {}, {}),
+    (403, {'x-ratelimit-remaining': '0'}, {}),
+    (403, {'retry-after': '60'}, {}),
+    (403, {}, {'message': 'API rate limit exceeded'}),
+])
+async def test_rate_limit_web_fallback_and_offline_reuse(tmp_path, monkeypatch, status, headers, body):
+    requests = []
+    def respond(request):
+        requests.append(str(request.url))
+        if request.url.host == 'api.github.com':
+            return httpx.Response(status, headers=headers, json=body)
+        if request.url.host == 'github.com':
+            return httpx.Response(302, headers={
+                'location': 'https://github.com/Arrhenius401/stock_robot/releases/tag/v1%2Bhotfix',
+            })
+        assert str(request.url) == 'https://codeload.github.com/Arrhenius401/stock_robot/zip/refs/tags/v1%2Bhotfix'
+        return httpx.Response(200, content=archive())
+    original = httpx.AsyncClient
+    monkeypatch.setattr(bootstrap.httpx, 'AsyncClient', lambda **kw: original(
+        transport=httpx.MockTransport(respond), **kw))
+    assert (await bootstrap.download_source(None, tmp_path)).ok
+    info = json.loads((tmp_path / 'src/.bootstrap-source.json').read_text())
+    assert info['release_tag'] == 'v1+hotfix'
+    assert info['release_resolution'] == 'web'
+    assert 'release_id' not in info
+    assert len(info['archive_sha256']) == 64
+    assert (await bootstrap.download_source(None, tmp_path)).ok
+    assert len(requests) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status,location', [
+    (200, ''), (404, ''), (503, ''), (302, ''),
+    (302, 'http://github.com/Arrhenius401/stock_robot/releases/tag/v1'),
+    (302, 'https://evil.example/Arrhenius401/stock_robot/releases/tag/v1'),
+    (302, 'https://github.com/other/repo/releases/tag/v1'),
+    (302, 'https://user@github.com/Arrhenius401/stock_robot/releases/tag/v1'),
+    (302, 'https://github.com/Arrhenius401/stock_robot/releases/tag/v1?token=secret'),
+    (302, 'https://github.com/Arrhenius401/stock_robot/releases/tag/v1#fragment'),
+    (302, 'https://github.com/Arrhenius401/stock_robot/releases/tag/'),
+    (302, 'https://github.com/Arrhenius401/stock_robot/releases/tag/%2E%2E/main'),
+    (302, 'https://github.com/Arrhenius401/stock_robot/releases/tag/v1%3Fwrong'),
+])
+async def test_rate_limit_fallback_rejects_untrusted_redirect(tmp_path, monkeypatch, status, location):
+    requests = []
+    def respond(request):
+        requests.append(str(request.url))
+        if request.url.host == 'api.github.com':
+            return httpx.Response(429)
+        assert request.url.host == 'github.com'
+        return httpx.Response(status, headers={'location': location})
+    original = httpx.AsyncClient
+    monkeypatch.setattr(bootstrap.httpx, 'AsyncClient', lambda **kw: original(
+        transport=httpx.MockTransport(respond), **kw))
+    result = await bootstrap.download_source(None, tmp_path)
+    assert not result.ok
+    assert '限流' in result.detail
+    assert not (tmp_path / 'src').exists()
     assert len(requests) == 2
 
 

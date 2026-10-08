@@ -10,7 +10,7 @@
 
 首次安装时，`source_archive_url` 留空会查询 stock_robot 最新正式 GitHub Release（不含草稿或预发布），解析标签后下载该固定标签的源码 ZIP。插件不与服务版本绑定，stock_robot 应保持插件所用 API 向后兼容。已有有效源码优先复用，普通重载不会查询或升级服务。
 
-也可填写自定义固定提交或标签 ZIP 地址；归档须包含 `pyproject.toml` 和 `requirements-core.lock.txt`，启用 RAG 时另需 `requirements-rag.lock.txt`。不建议使用持续变化的 main.zip。没有正式 Release、网络或限流错误、归档不完整时明确失败，不自动退回开发分支。2026-10-07 验证时公开仓库尚无 Release，默认冷安装需等待首个正式发布；已有安装及自定义归档仍可使用。
+也可填写自定义固定提交或标签 ZIP 地址；归档须包含 `pyproject.toml` 和 `requirements-core.lock.txt`，启用 RAG 时另需 `requirements-rag.lock.txt`。不建议使用持续变化的 main.zip。正常通过 GitHub API 查询最新正式版；API 明确限流时，改用官方 latest 网页的同仓库标签重定向。解析后从 codeload 下载固定标签归档，不需要配置 GitHub Token。没有正式 Release、普通权限拒绝、网络错误、备用查询失败或归档不完整时明确失败，不自动退回开发分支。stock_robot 已发布 v0.1.0，默认安装可获取正式版；已有安装及自定义归档仍可使用。
 
 安装优先使用 uv，否则使用 Python venv/pip；按带哈希的锁清单安装依赖，再以 `--no-deps` 安装源码。`bootstrap_extras` 留空只装核心依赖，填写 `rag` 安装检索依赖，其他值不接受。RAG 体积较大，首次安装可能超过聊天工具的等待时间。
 
@@ -54,7 +54,7 @@ instance/
 
 修改 extras 后重载插件，会按对应锁清单补装依赖并更新安装标记；改回核心模式不会自动卸载原有 RAG 包。修改归档地址不会自动升级现有源码。
 
-自动下载的正式版标签和Release编号记录在 `instance/src/.bootstrap-source.json`，同一来源记录写入 `install-state.json`，并在安装日志中显示标签。SHA256记录实际下载内容，不代表发布方签名或预期摘要校验；自定义归档仅记录地址和摘要，不推断版本号。
+自动下载的正式版标签、查询渠道（`release_resolution`）及 API 返回的 Release 编号记录在 `instance/src/.bootstrap-source.json`；网页备用渠道不包含 Release 编号，旧来源记录仍兼容。同一来源记录写入 `install-state.json`，并在安装日志中显示标签。SHA256记录实际下载内容，不代表发布方签名或预期摘要校验；自定义归档仅记录地址和摘要，不推断版本号。
 
 主动重装或升级时，先停用插件、确认自建进程已退出并备份数据。只移除 `instance/src`、`instance/venv`、`instance/install-state.json` 后重新启用。保留 `.stock_robot`、`reports` 和其他用户数据，不删除整个 instance。归档地址留空将重新获取当时最新正式版；设置自定义地址则安装指定归档。自行部署、插件仅连接的服务由用户自行升级。
 

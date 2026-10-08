@@ -22,7 +22,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 import yaml
@@ -30,7 +30,8 @@ import yaml
 logger = logging.getLogger(__name__)
 DEFAULT_ARCHIVE_URL: str | None = None
 RELEASE_API_URL = "https://api.github.com/repos/Arrhenius401/stock_robot/releases/latest"
-SOURCE_API_URL = "https://api.github.com/repos/Arrhenius401/stock_robot/zipball/"
+LATEST_RELEASE_URL = "https://github.com/Arrhenius401/stock_robot/releases/latest"
+SOURCE_ARCHIVE_URL = "https://codeload.github.com/Arrhenius401/stock_robot/zip/refs/tags/"
 INSTALL_TIMEOUT_SECONDS = 1200
 DOWNLOAD_TIMEOUT_SECONDS = 300
 Runner = Callable[[list[str], Path], Awaitable[tuple[int, str]]]
@@ -341,11 +342,57 @@ def _extract(bundle_path: Path, target: Path) -> None:
             raise ValueError("归档缺少 pyproject.toml")
 
 
+def _tag_archive(tag: str) -> str:
+    """只拼接有效固定标签，避免解码后的路径或控制字符改变下载目标。"""
+    parts = tag.split("/")
+    if (not tag or tag == "@" or ".." in tag or "@{" in tag
+            or re.search(r"[\x00-\x20\x7f~^:?*\[\\]", tag)
+            or any(not part or part.startswith(".") or part.endswith((".", ".lock")) for part in parts)):
+        raise ValueError("正式发布版本标签无效")
+    return SOURCE_ARCHIVE_URL + quote(tag, safe="")
+
+
+def _rate_limited(response: httpx.Response) -> bool:
+    """普通权限拒绝不能触发备用渠道，403 需要明确的限流证据。"""
+    if response.status_code == 429:
+        return True
+    if response.status_code != 403:
+        return False
+    if response.headers.get("x-ratelimit-remaining") == "0" or response.headers.get("retry-after"):
+        return True
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and "rate limit" in str(body.get("message", "")).casefold()
+
+
+async def _latest_release_web(client: httpx.AsyncClient) -> tuple[str, dict[str, Any]]:
+    """官方 latest 的重定向即标签来源，不追踪任意跳转或解析页面内容。"""
+    response = await client.get(LATEST_RELEASE_URL, follow_redirects=False)
+    if response.status_code not in {301, 302, 303, 307, 308}:
+        response.raise_for_status()
+        raise ValueError("官方 latest 未返回正式版标签重定向")
+    location = urlsplit(response.headers.get("location", ""))
+    prefix = "/Arrhenius401/stock_robot/releases/tag/"
+    if (location.scheme != "https" or location.netloc != "github.com"
+            or not location.path.startswith(prefix) or location.query or location.fragment):
+        raise ValueError("官方 latest 返回了非预期的仓库标签地址")
+    tag = unquote(location.path[len(prefix):], errors="strict")
+    return _tag_archive(tag), {"release_tag": tag, "release_resolution": "web"}
+
+
 async def _latest_release(client: httpx.AsyncClient) -> tuple[str, dict[str, Any]]:
     """只解析正式Release，后续下载锁定到本次返回的标签。"""
     response = await client.get(RELEASE_API_URL, headers={"Accept": "application/vnd.github+json"})
     if response.status_code == 404:
         raise ValueError("stock_robot尚无正式发布版本，请等待发布或填写固定源码归档地址")
+    if _rate_limited(response):
+        logger.warning("GitHub Release API 限流，改用官方 latest 标签重定向")
+        try:
+            return await _latest_release_web(client)
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ValueError(f"GitHub API限流，备用正式版查询失败：{redact(str(exc))}") from exc
     response.raise_for_status()
     release = response.json()
     if not isinstance(release, dict):
@@ -358,7 +405,7 @@ async def _latest_release(client: httpx.AsyncClient) -> tuple[str, dict[str, Any
         raise ValueError("正式发布版本标签缺失")
     if type(release_id) is not int or release_id <= 0:
         raise ValueError("正式发布版本记录无效")
-    return SOURCE_API_URL + quote(tag, safe=""), {"release_tag": tag, "release_id": release_id}
+    return _tag_archive(tag), {"release_tag": tag, "release_id": release_id, "release_resolution": "api"}
 
 
 async def download_source(archive_url: str | None, instance: Path, *, extras: str = "") -> StepResult:
