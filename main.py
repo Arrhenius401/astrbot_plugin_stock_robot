@@ -81,7 +81,7 @@ async def read_llm_config(context: Context) -> dict | None:
 @register(
     "astrbot_plugin_stock_robot",
     "Arrhenius401",
-    "调用本机 stock_robot 服务完成个股/指数分析，并把完整研报渲染为图片发送",
+    "在聊天中分析股票与指数，获取完整研报图片。",
     "1.0.0",
 )
 class StockRobotPlugin(Star):

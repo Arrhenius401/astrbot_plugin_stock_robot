@@ -1,12 +1,8 @@
 name: astrbot_plugin_stock_robot
 display_name: 股票分析助手
-short_desc: 在聊天里获取个股/指数研报图片
+short_desc: 在聊天中分析股票与指数，获取完整研报图片。
 desc: |
-  把 stock_robot 的个股与指数分析能力封装为 AstrBot 的 LLM 工具。
-  用户询问某只股票或指数时，插件调用本机部署的 stock_robot 服务完成分析，
-  并把完整研报渲染为图片直接发送。
-
-  支持复用已有服务，或在本机回环地址后台准备独立服务（见 README）。
+  发送股票或指数名称、代码，即可获取分析研报。支持 A 股个股与指数分析，结合市场数据、指标与 AI 解读，帮助你了解标的表现。完整报告以图片发送到聊天中，方便阅读和分享。
 version: 1.0.0
 author: Arrhenius401
 repo: https://github.com/Arrhenius401/astrbot_plugin_stock_robot
