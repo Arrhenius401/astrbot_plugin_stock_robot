@@ -58,6 +58,23 @@ def plugin_main(monkeypatch, tmp_path):
     return importlib.import_module(name)
 
 
+def test_plugin_modules_share_framework_logger(plugin_main, caplog):
+    """入口与辅助模块统一走框架日志，参数格式能正常展开。"""
+    package = plugin_main.__package__
+    modules = [plugin_main] + [
+        importlib.import_module(f"{package}.{name}")
+        for name in ("client", "bootstrap", "launcher")
+    ]
+    framework_logger = sys.modules["astrbot.api"].logger
+    with caplog.at_level(logging.WARNING, logger="plugin-test"):
+        for module in modules:
+            assert module.logger is framework_logger
+            module.logger.warning("日志来源：%s", module.__name__)
+    assert [record.getMessage() for record in caplog.records] == [
+        f"日志来源：{module.__name__}" for module in modules
+    ]
+
+
 @pytest.mark.parametrize(
     "kind, valid",
     [

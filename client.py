@@ -1,14 +1,12 @@
-"""stock_robot HTTP 客户端与用户文案 —— 不依赖 astrbot，可独立单测。"""
+"""stock_robot HTTP 客户端与用户文案，使用 AstrBot 框架日志。"""
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Literal
 
 import httpx
-
-logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 DEFAULT_BASE_URL = "http://127.0.0.1:25618"
 DEFAULT_TIMEOUT_SECONDS = 100

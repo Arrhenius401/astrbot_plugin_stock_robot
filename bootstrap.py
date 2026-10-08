@@ -1,4 +1,4 @@
-"""独立服务的下载、锁定安装及中断恢复，不依赖 AstrBot。"""
+"""独立服务的下载、锁定安装及中断恢复，使用 AstrBot 框架日志。"""
 from __future__ import annotations
 
 import asyncio
@@ -6,7 +6,6 @@ import codecs
 import ctypes
 import hashlib
 import json
-import logging
 import os
 import re
 import shutil
@@ -26,8 +25,8 @@ from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 import yaml
+from astrbot.api import logger
 
-logger = logging.getLogger(__name__)
 DEFAULT_ARCHIVE_URL: str | None = None
 RELEASE_API_URL = "https://api.github.com/repos/Arrhenius401/stock_robot/releases/latest"
 LATEST_RELEASE_URL = "https://github.com/Arrhenius401/stock_robot/releases/latest"

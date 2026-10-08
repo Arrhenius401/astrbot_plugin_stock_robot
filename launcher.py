@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-import logging
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import yaml
+from astrbot.api import logger
 
 from .bootstrap import (
     Runner,
@@ -26,7 +26,6 @@ from .bootstrap import (
     write_config,
 )
 
-logger = logging.getLogger(__name__)
 State = Literal["idle", "starting", "ready", "failed", "stopped"]
 
 
