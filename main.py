@@ -82,7 +82,7 @@ async def read_llm_config(context: Context) -> dict | None:
     "astrbot_plugin_stock_robot",
     "Arrhenius401",
     "调用本机 stock_robot 服务完成个股/指数分析，并把完整研报渲染为图片发送",
-    "1.1.0",
+    "1.0.0",
 )
 class StockRobotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):

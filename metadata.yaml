@@ -7,7 +7,7 @@ desc: |
   并把完整研报渲染为图片直接发送。
 
   支持复用已有服务，或在本机回环地址后台准备独立服务（见 README）。
-version: 1.1.0
+version: 1.0.0
 author: Arrhenius401
 repo: https://github.com/Arrhenius401/astrbot_plugin_stock_robot
 astrbot_version: ">=4.27,<5"  # 开发与验证基线 4.27.4
