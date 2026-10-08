@@ -1,4 +1,5 @@
 """独立服务的下载、锁定安装及中断恢复，使用 AstrBot 框架日志。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -28,9 +29,13 @@ import yaml
 from astrbot.api import logger
 
 DEFAULT_ARCHIVE_URL: str | None = None
-RELEASE_API_URL = "https://api.github.com/repos/Arrhenius401/stock_robot/releases/latest"
+RELEASE_API_URL = (
+    "https://api.github.com/repos/Arrhenius401/stock_robot/releases/latest"
+)
 LATEST_RELEASE_URL = "https://github.com/Arrhenius401/stock_robot/releases/latest"
-SOURCE_ARCHIVE_URL = "https://codeload.github.com/Arrhenius401/stock_robot/zip/refs/tags/"
+SOURCE_ARCHIVE_URL = (
+    "https://codeload.github.com/Arrhenius401/stock_robot/zip/refs/tags/"
+)
 INSTALL_TIMEOUT_SECONDS = 1200
 DOWNLOAD_TIMEOUT_SECONDS = 300
 Runner = Callable[[list[str], Path], Awaitable[tuple[int, str]]]
@@ -46,45 +51,84 @@ def redact(text: str) -> str:
     """去除 URL 认证、查询串和常见凭据，安装输出也不直接暴露。"""
     text = re.sub(r"(https?://)[^/\s@]+@", r"\1[认证已隐藏]@", text)
     text = re.sub(r"(https?://[^\s?]+)\?[^\s]+", r"\1?[参数已隐藏]", text)
-    text = re.sub(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?(?:bearer|basic)\s+)\S+", r"\1[已隐藏]", text)
-    text = re.sub(r"(?i)((?:api[_-]?key|token|password|authorization)[\"']?\s*[:=]\s*)([\"'])(.*?)\2", r"\1\2[已隐藏]\2", text)
-    text = re.sub(r"(?i)((?:api[_-]?key|token|password|authorization)[\"']?\s*[:=]\s*)[^\s,}]+", r"\1[已隐藏]", text)
+    text = re.sub(
+        r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?(?:bearer|basic)\s+)\S+",
+        r"\1[已隐藏]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)((?:api[_-]?key|token|password|authorization)[\"']?\s*[:=]\s*)([\"'])(.*?)\2",
+        r"\1\2[已隐藏]\2",
+        text,
+    )
+    text = re.sub(
+        r"(?i)((?:api[_-]?key|token|password|authorization)[\"']?\s*[:=]\s*)[^\s,}]+",
+        r"\1[已隐藏]",
+        text,
+    )
     return re.sub(r"\bsk-[A-Za-z0-9_-]+", "[密钥已隐藏]", text)
 
 
 def venv_python(instance: Path) -> Path:
-    return instance / "venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    return (
+        instance
+        / "venv"
+        / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    )
 
 
 def venv_launcher(instance: Path) -> Path:
-    return instance / "venv" / ("Scripts/stock-robot.exe" if sys.platform == "win32" else "bin/stock-robot")
+    return (
+        instance
+        / "venv"
+        / ("Scripts/stock-robot.exe" if sys.platform == "win32" else "bin/stock-robot")
+    )
 
 
 def spawn_kwargs() -> dict[str, Any]:
-    return {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {"start_new_session": True}
+    return (
+        {"creationflags": subprocess.CREATE_NO_WINDOW}
+        if sys.platform == "win32"
+        else {"start_new_session": True}
+    )
 
 
 class _JobBasicLimit(ctypes.Structure):
     _fields_ = [
-        ("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
-        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
-        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
-        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD),
+        ("PerProcessUserTimeLimit", ctypes.c_longlong),
+        ("PerJobUserTimeLimit", ctypes.c_longlong),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
     ]
 
 
 class _JobIoCounters(ctypes.Structure):
-    _fields_ = [(name, ctypes.c_ulonglong) for name in (
-        "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-        "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-    )]
+    _fields_ = [
+        (name, ctypes.c_ulonglong)
+        for name in (
+            "ReadOperationCount",
+            "WriteOperationCount",
+            "OtherOperationCount",
+            "ReadTransferCount",
+            "WriteTransferCount",
+            "OtherTransferCount",
+        )
+    ]
 
 
 class _JobExtendedLimit(ctypes.Structure):
     _fields_ = [
-        ("BasicLimitInformation", _JobBasicLimit), ("IoInfo", _JobIoCounters),
-        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
-        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ("BasicLimitInformation", _JobBasicLimit),
+        ("IoInfo", _JobIoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
     ]
 
 
@@ -97,7 +141,12 @@ class _WindowsJob:
         kernel = self._kernel
         kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         kernel.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
         kernel.SetInformationJobObject.restype = wintypes.BOOL
         kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
         kernel.AssignProcessToJobObject.restype = wintypes.BOOL
@@ -113,8 +162,12 @@ class _WindowsJob:
         if not self._handle:
             raise ctypes.WinError(ctypes.get_last_error())
         information = _JobExtendedLimit()
-        information.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not kernel.SetInformationJobObject(self._handle, 9, ctypes.byref(information), ctypes.sizeof(information)):
+        information.BasicLimitInformation.LimitFlags = (
+            0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        )
+        if not kernel.SetInformationJobObject(
+            self._handle, 9, ctypes.byref(information), ctypes.sizeof(information)
+        ):
             error = ctypes.WinError(ctypes.get_last_error())
             self.close()
             raise error
@@ -146,11 +199,13 @@ _owned_jobs: dict[asyncio.subprocess.Process, _WindowsJob] = {}
 _job_watchers: set[asyncio.Task[None]] = set()
 
 
-async def _watch_parent_exit(process: asyncio.subprocess.Process, job: _WindowsJob) -> None:
+async def _watch_parent_exit(
+    process: asyncio.subprocess.Process, job: _WindowsJob
+) -> None:
     try:
         # Process.wait 在后代继承 PIPE 时可能等 EOF；returncode 可直接观察父退出。
         while process.returncode is None:
-            await asyncio.sleep(.05)
+            await asyncio.sleep(0.05)
         job.close()
         await asyncio.wait_for(process.wait(), 5)
         _owned_jobs.pop(process, None)
@@ -165,7 +220,9 @@ async def spawn_process(*args: str, **kwargs: Any) -> asyncio.subprocess.Process
     options = {**spawn_kwargs(), **kwargs}
     job = _WindowsJob() if sys.platform == "win32" else None
     if job is not None:
-        options["creationflags"] = options.get("creationflags", 0) | 0x4  # CREATE_SUSPENDED
+        options["creationflags"] = (
+            options.get("creationflags", 0) | 0x4
+        )  # CREATE_SUSPENDED
     creation = asyncio.create_task(asyncio.create_subprocess_exec(*args, **options))
     process: asyncio.subprocess.Process | None = None
     try:
@@ -204,8 +261,13 @@ async def reap_process(process: asyncio.subprocess.Process) -> None:
             job.close()
         elif process.returncode is None:
             killer = await asyncio.create_subprocess_exec(
-                "taskkill", "/PID", str(process.pid), "/T", "/F",
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
             await killer.wait()
@@ -235,16 +297,21 @@ async def run_command(cmd: list[str], cwd: Path, *, log_path: Path) -> tuple[int
     """实时记录脱敏输出；取消与超时均等待自建子进程回收。"""
     tail: deque[str] = deque(maxlen=30)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    creation = asyncio.create_task(spawn_process(
-        *cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    ))
+    creation = asyncio.create_task(
+        spawn_process(
+            *cmd,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    )
     try:
         process = await asyncio.shield(creation)
     except asyncio.CancelledError:
         process = await creation
         await reap_process(process)
         raise
+
     async def consume() -> None:
         assert process.stdout is not None
         # 分块而非 readline，避免无换行安装输出超过 StreamReader 上限。
@@ -262,7 +329,11 @@ async def run_command(cmd: list[str], cwd: Path, *, log_path: Path) -> tuple[int
                         dropping = True
                         break
                     pending = remaining
-                    safe = "[过长安装日志行已略去]" if dropping or len(line) > 8192 else redact(line)
+                    safe = (
+                        "[过长安装日志行已略去]"
+                        if dropping or len(line) > 8192
+                        else redact(line)
+                    )
                     dropping = False
                     output.write(safe + "\n")
                     output.flush()
@@ -273,6 +344,7 @@ async def run_command(cmd: list[str], cwd: Path, *, log_path: Path) -> tuple[int
                 output.write(safe + "\n")
                 tail.append(safe)
             await process.wait()
+
     try:
         await asyncio.wait_for(consume(), INSTALL_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
@@ -300,7 +372,9 @@ def _source_info(instance: Path) -> dict[str, Any] | None:
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, delete=False
+    ) as stream:
         temporary = Path(stream.name)
         json.dump(value, stream, ensure_ascii=False)
     try:
@@ -318,15 +392,28 @@ def _extract(bundle_path: Path, target: Path) -> None:
         for entry in entries:
             path = PurePosixPath(entry.filename)
             mode = entry.external_attr >> 16
-            reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+            reserved = {
+                "CON",
+                "PRN",
+                "AUX",
+                "NUL",
+                *(f"COM{i}" for i in range(1, 10)),
+                *(f"LPT{i}" for i in range(1, 10)),
+            }
             invalid_windows_name = any(
                 part.endswith((".", " ")) or part.split(".")[0].upper() in reserved
                 for part in path.parts
             )
-            if (not path.parts or path.is_absolute() or ".." in path.parts
-                    or "\\" in entry.filename or ":" in entry.filename
-                    or invalid_windows_name
-                    or stat.S_ISLNK(mode) or (stat.S_IFMT(mode) not in {0, stat.S_IFREG, stat.S_IFDIR})):
+            if (
+                not path.parts
+                or path.is_absolute()
+                or ".." in path.parts
+                or "\\" in entry.filename
+                or ":" in entry.filename
+                or invalid_windows_name
+                or stat.S_ISLNK(mode)
+                or (stat.S_IFMT(mode) not in {0, stat.S_IFREG, stat.S_IFDIR})
+            ):
                 raise ValueError("归档包含不安全成员")
             roots.add(path.parts[0])
             key = entry.filename.rstrip("/").casefold()
@@ -344,9 +431,17 @@ def _extract(bundle_path: Path, target: Path) -> None:
 def _tag_archive(tag: str) -> str:
     """只拼接有效固定标签，避免解码后的路径或控制字符改变下载目标。"""
     parts = tag.split("/")
-    if (not tag or tag == "@" or ".." in tag or "@{" in tag
-            or re.search(r"[\x00-\x20\x7f~^:?*\[\\]", tag)
-            or any(not part or part.startswith(".") or part.endswith((".", ".lock")) for part in parts)):
+    if (
+        not tag
+        or tag == "@"
+        or ".." in tag
+        or "@{" in tag
+        or re.search(r"[\x00-\x20\x7f~^:?*\[\\]", tag)
+        or any(
+            not part or part.startswith(".") or part.endswith((".", ".lock"))
+            for part in parts
+        )
+    ):
         raise ValueError("正式发布版本标签无效")
     return SOURCE_ARCHIVE_URL + quote(tag, safe="")
 
@@ -357,13 +452,18 @@ def _rate_limited(response: httpx.Response) -> bool:
         return True
     if response.status_code != 403:
         return False
-    if response.headers.get("x-ratelimit-remaining") == "0" or response.headers.get("retry-after"):
+    if response.headers.get("x-ratelimit-remaining") == "0" or response.headers.get(
+        "retry-after"
+    ):
         return True
     try:
         body = response.json()
     except ValueError:
         return False
-    return isinstance(body, dict) and "rate limit" in str(body.get("message", "")).casefold()
+    return (
+        isinstance(body, dict)
+        and "rate limit" in str(body.get("message", "")).casefold()
+    )
 
 
 async def _latest_release_web(client: httpx.AsyncClient) -> tuple[str, dict[str, Any]]:
@@ -374,24 +474,35 @@ async def _latest_release_web(client: httpx.AsyncClient) -> tuple[str, dict[str,
         raise ValueError("官方 latest 未返回正式版标签重定向")
     location = urlsplit(response.headers.get("location", ""))
     prefix = "/Arrhenius401/stock_robot/releases/tag/"
-    if (location.scheme != "https" or location.netloc != "github.com"
-            or not location.path.startswith(prefix) or location.query or location.fragment):
+    if (
+        location.scheme != "https"
+        or location.netloc != "github.com"
+        or not location.path.startswith(prefix)
+        or location.query
+        or location.fragment
+    ):
         raise ValueError("官方 latest 返回了非预期的仓库标签地址")
-    tag = unquote(location.path[len(prefix):], errors="strict")
+    tag = unquote(location.path[len(prefix) :], errors="strict")
     return _tag_archive(tag), {"release_tag": tag, "release_resolution": "web"}
 
 
 async def _latest_release(client: httpx.AsyncClient) -> tuple[str, dict[str, Any]]:
     """只解析正式Release，后续下载锁定到本次返回的标签。"""
-    response = await client.get(RELEASE_API_URL, headers={"Accept": "application/vnd.github+json"})
+    response = await client.get(
+        RELEASE_API_URL, headers={"Accept": "application/vnd.github+json"}
+    )
     if response.status_code == 404:
-        raise ValueError("stock_robot尚无正式发布版本，请等待发布或填写固定源码归档地址")
+        raise ValueError(
+            "stock_robot尚无正式发布版本，请等待发布或填写固定源码归档地址"
+        )
     if _rate_limited(response):
         logger.warning("GitHub Release API 限流，改用官方 latest 标签重定向")
         try:
             return await _latest_release_web(client)
         except (httpx.HTTPError, ValueError) as exc:
-            raise ValueError(f"GitHub API限流，备用正式版查询失败：{redact(str(exc))}") from exc
+            raise ValueError(
+                f"GitHub API限流，备用正式版查询失败：{redact(str(exc))}"
+            ) from exc
     response.raise_for_status()
     release = response.json()
     if not isinstance(release, dict):
@@ -404,17 +515,25 @@ async def _latest_release(client: httpx.AsyncClient) -> tuple[str, dict[str, Any
         raise ValueError("正式发布版本标签缺失")
     if type(release_id) is not int or release_id <= 0:
         raise ValueError("正式发布版本记录无效")
-    return _tag_archive(tag), {"release_tag": tag, "release_id": release_id, "release_resolution": "api"}
+    return _tag_archive(tag), {
+        "release_tag": tag,
+        "release_id": release_id,
+        "release_resolution": "api",
+    }
 
 
-async def download_source(archive_url: str | None, instance: Path, *, extras: str = "") -> StepResult:
+async def download_source(
+    archive_url: str | None, instance: Path, *, extras: str = ""
+) -> StepResult:
     if _source_info(instance):
         return StepResult(True, "复用已校验源码")
     if (instance / "src").exists():
         return StepResult(False, "现有源码缺少有效来源记录，请停用后移除 src 再重试")
     try:
         instance.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=".bootstrap-", dir=instance) as directory:
+        with tempfile.TemporaryDirectory(
+            prefix=".bootstrap-", dir=instance
+        ) as directory:
             temporary = Path(directory)
             archive = temporary / "source.zip"
             digest = hashlib.sha256()
@@ -425,7 +544,9 @@ async def download_source(archive_url: str | None, instance: Path, *, extras: st
             ):
                 if not archive_url:
                     archive_url, release_info = await _latest_release(client)
-                    logger.info("准备安装stock_robot正式版：%s", release_info["release_tag"])
+                    logger.info(
+                        "准备安装stock_robot正式版：%s", release_info["release_tag"]
+                    )
                 async with client.stream("GET", archive_url) as response:
                     response.raise_for_status()
                     with archive.open("wb") as output:
@@ -440,13 +561,27 @@ async def download_source(archive_url: str | None, instance: Path, *, extras: st
                 required.append("requirements-rag.lock.txt")
             if any(not (source / name).is_file() for name in required):
                 raise ValueError("源码归档缺少所需锁定依赖清单")
-            _write_json(source / ".bootstrap-source.json", {
-                "archive_url": archive_url, "archive_sha256": digest.hexdigest(), **release_info,
-            })
+            _write_json(
+                source / ".bootstrap-source.json",
+                {
+                    "archive_url": archive_url,
+                    "archive_sha256": digest.hexdigest(),
+                    **release_info,
+                },
+            )
             source.replace(instance / "src")
         logger.info("自举源码下载完成：%s", redact(archive_url))
         return StepResult(True)
-    except (httpx.HTTPError, TimeoutError, OSError, ValueError, TypeError, zipfile.BadZipFile, NotImplementedError, RuntimeError) as exc:
+    except (
+        httpx.HTTPError,
+        TimeoutError,
+        OSError,
+        ValueError,
+        TypeError,
+        zipfile.BadZipFile,
+        NotImplementedError,
+        RuntimeError,
+    ) as exc:
         logger.warning("源码准备失败：%s", redact(str(exc)))
         return StepResult(False, f"源码准备失败：{redact(str(exc))}")
 
@@ -455,11 +590,17 @@ async def make_env(instance: Path, extras: str, *, runner: Runner) -> StepResult
     source = instance / "src"
     python = venv_python(instance)
     uv = shutil.which("uv")
-    requirements = source / ("requirements-rag.lock.txt" if extras == "rag" else "requirements-core.lock.txt")
+    requirements = source / (
+        "requirements-rag.lock.txt" if extras == "rag" else "requirements-core.lock.txt"
+    )
     if not requirements.is_file():
         return StepResult(False, "源码缺少锁定依赖清单")
     if not python.is_file():
-        command = [uv, "venv", "--python", sys.executable, str(instance / "venv")] if uv else [sys.executable, "-m", "venv", str(instance / "venv")]
+        command = (
+            [uv, "venv", "--python", sys.executable, str(instance / "venv")]
+            if uv
+            else [sys.executable, "-m", "venv", str(instance / "venv")]
+        )
         code, output = await runner(command, instance)
         if code:
             return StepResult(False, f"创建环境失败：{redact(output)}")
@@ -469,8 +610,15 @@ async def make_env(instance: Path, extras: str, *, runner: Runner) -> StepResult
             code, output = await runner([str(python), "-m", "ensurepip"], instance)
             if code:
                 return StepResult(False, f"补装 pip 失败：{redact(output)}")
-    prefix = [uv, "pip", "install", "--python", str(python)] if uv else [str(python), "-m", "pip", "install"]
-    for arguments, stage in [(["--require-hashes", "-r", str(requirements)], "锁定依赖安装"), (["--no-deps", "-e", "."], "项目安装")]:
+    prefix = (
+        [uv, "pip", "install", "--python", str(python)]
+        if uv
+        else [str(python), "-m", "pip", "install"]
+    )
+    for arguments, stage in [
+        (["--require-hashes", "-r", str(requirements)], "锁定依赖安装"),
+        (["--no-deps", "-e", "."], "项目安装"),
+    ]:
         code, output = await runner(prefix + arguments, source)
         if code:
             return StepResult(False, f"{stage}失败：{redact(output)}")
@@ -486,15 +634,30 @@ def write_config(instance: Path, llm: dict[str, Any] | None, port: int) -> StepR
             if not isinstance(existing, dict):
                 return StepResult(False, "已有配置不是 YAML 对象，请修复原配置")
             return StepResult(True, "保留已有配置")
-        valid = isinstance(llm, dict) and llm.get("provider") in {"openai", "claude"} and bool(llm.get("api_key")) and bool(llm.get("model"))
-        effective = dict(llm, enabled=True) if valid and llm is not None else {"enabled": False}
+        valid = (
+            isinstance(llm, dict)
+            and llm.get("provider") in {"openai", "claude"}
+            and bool(llm.get("api_key"))
+            and bool(llm.get("model"))
+        )
+        effective = (
+            dict(llm, enabled=True) if valid and llm is not None else {"enabled": False}
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as stream:
             temporary = Path(stream.name)
             os.chmod(temporary, 0o600)
-            yaml.safe_dump({"llm": effective, "api": {"host": "127.0.0.1", "port": port}}, stream, allow_unicode=True)
+            yaml.safe_dump(
+                {"llm": effective, "api": {"host": "127.0.0.1", "port": port}},
+                stream,
+                allow_unicode=True,
+            )
         temporary.replace(path)
-        return StepResult(True, "" if valid else "模型未复制，请在自举服务 Web UI 配置模型")
+        return StepResult(
+            True, "" if valid else "模型未复制，请在自举服务 Web UI 配置模型"
+        )
     except (OSError, yaml.YAMLError):
         logger.warning("配置创建或解析失败，请检查原配置文件")
         return StepResult(False, "配置创建或解析失败，请检查原配置文件")
@@ -512,13 +675,22 @@ def instance_ready(instance: Path, extras: str) -> bool:
     except (OSError, ValueError):
         return False
     source = _source_info(instance)
-    return (extras in {"", "rag"} and isinstance(marker, dict) and source is not None
-            and marker.get("version") == 1 and marker.get("extras") == extras
-            and marker.get("source") == source and marker.get("dependency_strategy") == "locked-requirements-v1"
-            and venv_python(instance).is_file() and venv_launcher(instance).is_file())
+    return (
+        extras in {"", "rag"}
+        and isinstance(marker, dict)
+        and source is not None
+        and marker.get("version") == 1
+        and marker.get("extras") == extras
+        and marker.get("source") == source
+        and marker.get("dependency_strategy") == "locked-requirements-v1"
+        and venv_python(instance).is_file()
+        and venv_launcher(instance).is_file()
+    )
 
 
-async def ensure_instance(instance: Path, archive_url: str | None, extras: str, *, runner: Runner) -> StepResult:
+async def ensure_instance(
+    instance: Path, archive_url: str | None, extras: str, *, runner: Runner
+) -> StepResult:
     if extras not in {"", "rag"}:
         return StepResult(False, "bootstrap_extras 仅接受空或 rag")
     if instance_ready(instance, extras):
@@ -531,11 +703,24 @@ async def ensure_instance(instance: Path, archive_url: str | None, extras: str, 
             result = await make_env(instance, extras, runner=runner)
             if not result.ok:
                 return result
-            code, output = await runner([str(venv_launcher(instance)), "--help"], instance)
+            code, output = await runner(
+                [str(venv_launcher(instance)), "--help"], instance
+            )
             if code:
                 return StepResult(False, f"CLI 加载失败：{redact(output)}")
-            _write_json(instance / "install-state.json", {"version": 1, "extras": extras, "source": _source_info(instance), "dependency_strategy": "locked-requirements-v1"})
-            return StepResult(instance_ready(instance, extras), "" if instance_ready(instance, extras) else "安装产物不完整")
+            _write_json(
+                instance / "install-state.json",
+                {
+                    "version": 1,
+                    "extras": extras,
+                    "source": _source_info(instance),
+                    "dependency_strategy": "locked-requirements-v1",
+                },
+            )
+            return StepResult(
+                instance_ready(instance, extras),
+                "" if instance_ready(instance, extras) else "安装产物不完整",
+            )
     except (OSError, TimeoutError) as exc:
         logger.warning("实例准备失败：%s", redact(str(exc)))
         return StepResult(False, f"实例准备失败：{redact(str(exc))}")

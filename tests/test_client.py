@@ -454,9 +454,21 @@ def test_fallback_image_message_strips_trailing_slash():
 
 
 @respx.mock
-@pytest.mark.parametrize("payload", [[], None, {"reports": {}}, {"reports": "bad"}, {"reports": [None]}, {"reports": [{"id": {"bad": "value"}}]}])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        None,
+        {"reports": {}},
+        {"reports": "bad"},
+        {"reports": [None]},
+        {"reports": [{"id": {"bad": "value"}}]},
+    ],
+)
 def test_latest_report_id_invalid_structure_returns_none(payload):
-    respx.get(f"{BASE}/api/v1/reports").mock(return_value=httpx.Response(200, json=payload))
+    respx.get(f"{BASE}/api/v1/reports").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
 
     async def call():
         client = StockRobotClient(BASE)
@@ -469,12 +481,15 @@ def test_latest_report_id_invalid_structure_returns_none(payload):
 
 
 @respx.mock
-@pytest.mark.parametrize("response", [
-    httpx.Response(500, json={"detail": "api_key=TEST_SECRET_VALUE"}),
-    httpx.Response(500, text="Authorization: Bearer TEST_SECRET_VALUE"),
-    httpx.Response(200, text="api_key=TEST_SECRET_VALUE"),
-    httpx.Response(200, json=["api_key=TEST_SECRET_VALUE"]),
-])
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(500, json={"detail": "api_key=TEST_SECRET_VALUE"}),
+        httpx.Response(500, text="Authorization: Bearer TEST_SECRET_VALUE"),
+        httpx.Response(200, text="api_key=TEST_SECRET_VALUE"),
+        httpx.Response(200, json=["api_key=TEST_SECRET_VALUE"]),
+    ],
+)
 def test_analysis_errors_hide_credentials(response, caplog):
     respx.post(f"{BASE}/api/v1/analyze").mock(return_value=response)
     outcome = run(call_stock("600519"))
@@ -485,7 +500,11 @@ def test_analysis_errors_hide_credentials(response, caplog):
 
 @respx.mock
 def test_index_errors_hide_credentials(caplog):
-    respx.post(f"{BASE}/api/v1/index").mock(return_value=httpx.Response(200, json={"reports": [], "errors": ["token=TEST_SECRET_VALUE"]}))
+    respx.post(f"{BASE}/api/v1/index").mock(
+        return_value=httpx.Response(
+            200, json={"reports": [], "errors": ["token=TEST_SECRET_VALUE"]}
+        )
+    )
     outcome = run(call_index("000300"))
     assert not outcome.ok
     assert "TEST_SECRET_VALUE" not in outcome.user_message
@@ -493,7 +512,9 @@ def test_index_errors_hide_credentials(caplog):
 
 
 def test_error_detail_redacts_before_truncation():
-    response = httpx.Response(500, text="x" * 180 + " api_key=" + "TEST_SECRET_VALUE" * 20)
+    response = httpx.Response(
+        500, text="x" * 180 + " api_key=" + "TEST_SECRET_VALUE" * 20
+    )
     detail = StockRobotClient._error_detail(response)
     assert "TEST_SECRET" not in detail
     assert len(detail) <= 200

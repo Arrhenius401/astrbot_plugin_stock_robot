@@ -1,4 +1,5 @@
 """共享准备任务与自有进程生命周期回归。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -25,8 +26,15 @@ def make_launcher(tmp_path, **overrides):
     async def runner(*_):
         return 0, ""
 
-    options = {"base_url": "http://127.0.0.1:25618", "archive_url": None, "extras": "",
-               "auto_install": True, "timeout": 0.05, "data_dir": tmp_path, "runner": runner}
+    options = {
+        "base_url": "http://127.0.0.1:25618",
+        "archive_url": None,
+        "extras": "",
+        "auto_install": True,
+        "timeout": 0.05,
+        "data_dir": tmp_path,
+        "runner": runner,
+    }
     options.update(overrides)
     return launcher.ServiceLauncher(**options)
 
@@ -65,7 +73,9 @@ def reap_fake_process(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_shared_task_waiters_timeout_and_cancel_do_not_cancel_preparation(tmp_path, monkeypatch):
+async def test_shared_task_waiters_timeout_and_cancel_do_not_cancel_preparation(
+    tmp_path, monkeypatch
+):
     service = make_launcher(tmp_path)
     gate = asyncio.Event()
     calls = 0
@@ -79,7 +89,9 @@ async def test_shared_task_waiters_timeout_and_cancel_do_not_cancel_preparation(
 
     monkeypatch.setattr(service, "_prepare", prepare)
     service.start_background()
-    results = await asyncio.gather(*(service.ensure_ready(wait_timeout=0.01) for _ in range(2)))
+    results = await asyncio.gather(
+        *(service.ensure_ready(wait_timeout=0.01) for _ in range(2))
+    )
     assert not any(result.ok for result in results)
     waiter = asyncio.create_task(service.ensure_ready(wait_timeout=1))
     await asyncio.sleep(0)
@@ -94,13 +106,22 @@ async def test_shared_task_waiters_timeout_and_cancel_do_not_cancel_preparation(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status,payload,expected", [(200, {"status": "ok"}, True),
-    (200, [], False), (200, {"status": "bad"}, False), (503, {"status": "ok"}, False),
-    (200, "bad-json", False)])
+@pytest.mark.parametrize(
+    "status,payload,expected",
+    [
+        (200, {"status": "ok"}, True),
+        (200, [], False),
+        (200, {"status": "bad"}, False),
+        (503, {"status": "ok"}, False),
+        (200, "bad-json", False),
+    ],
+)
 async def test_health_response_contract(status, payload, expected):
     body = payload if isinstance(payload, str) else json.dumps(payload)
     with respx.mock:
-        respx.get("http://127.0.0.1:12345/health").mock(return_value=Response(status, text=body))
+        respx.get("http://127.0.0.1:12345/health").mock(
+            return_value=Response(status, text=body)
+        )
         assert await launcher.probe_health("http://127.0.0.1:12345") is expected
 
 
@@ -110,21 +131,29 @@ async def test_log_pump_redacts_split_and_oversized_lines(tmp_path):
     reader = asyncio.StreamReader()
     output = io.StringIO()
     task = asyncio.create_task(service._pump_log(reader, output))
-    for block in (b'Authorization: Bearer split-', b'secret\n',
-                  b'prefix ' + b'x' * 9000, b' token=long-secret\n',
-                  b'{"api_key": "tail-secret"}'):
+    for block in (
+        b"Authorization: Bearer split-",
+        b"secret\n",
+        b"prefix " + b"x" * 9000,
+        b" token=long-secret\n",
+        b'{"api_key": "tail-secret"}',
+    ):
         reader.feed_data(block)
         await asyncio.sleep(0)
     reader.feed_eof()
     await task
     log = output.getvalue()
-    assert all(secret not in log for secret in ("split-secret", "long-secret", "tail-secret"))
+    assert all(
+        secret not in log for secret in ("split-secret", "long-secret", "tail-secret")
+    )
     assert "过长服务日志行已略去" in log
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("content", [None, "llm: [", "llm: secret-key"])
-async def test_call_does_not_repair_invalid_config_or_install(tmp_path, monkeypatch, content):
+async def test_call_does_not_repair_invalid_config_or_install(
+    tmp_path, monkeypatch, content
+):
     service = make_launcher(tmp_path)
     if content is not None:
         configured(service)
@@ -165,7 +194,9 @@ async def test_confirmed_exit_allows_exactly_one_restart(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "probe_health", health)
     monkeypatch.setattr(launcher, "instance_ready", lambda *_: True)
     monkeypatch.setattr(launcher, "spawn_process", spawn)
-    results = await asyncio.gather(*(service.ensure_ready(wait_timeout=1) for _ in range(2)))
+    results = await asyncio.gather(
+        *(service.ensure_ready(wait_timeout=1) for _ in range(2))
+    )
     assert all(result.ok for result in results) and spawns == 1
     assert old.terminated == 0 and service._process is new
     await service.stop()
@@ -184,17 +215,19 @@ async def test_real_http_child_start_and_stop(tmp_path, monkeypatch):
         "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
         "import sys\n"
         "print('Authorization: Bearer raw-bearer-secret', flush=True)\n"
-        "print('{\"api_key\": \"raw-json-secret\"}', flush=True)\n"
+        'print(\'{"api_key": "raw-json-secret"}\', flush=True)\n'
         "class H(BaseHTTPRequestHandler):\n"
         " def do_GET(self):\n"
-        "  self.send_response(200); self.end_headers(); self.wfile.write(b'{\"status\":\"ok\"}')\n"
+        '  self.send_response(200); self.end_headers(); self.wfile.write(b\'{"status":"ok"}\')\n'
         "HTTPServer((sys.argv[1], int(sys.argv[2])), H).serve_forever()\n",
         encoding="utf-8",
     )
     original_spawn = launcher.spawn_process
 
     async def spawn(*args, **kwargs):
-        return await original_spawn(sys.executable, str(script), args[-3], args[-1], **kwargs)
+        return await original_spawn(
+            sys.executable, str(script), args[-3], args[-1], **kwargs
+        )
 
     monkeypatch.setattr(launcher, "instance_ready", lambda *_: True)
     monkeypatch.setattr(launcher, "spawn_process", spawn)
@@ -214,9 +247,15 @@ async def test_real_http_child_start_and_stop(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url,enabled", [("http://remote.example:123", True),
-    ("https://localhost:123", True), ("http://localhost:123/path", True),
-    ("http://localhost:123", False)])
+@pytest.mark.parametrize(
+    "url,enabled",
+    [
+        ("http://remote.example:123", True),
+        ("https://localhost:123", True),
+        ("http://localhost:123/path", True),
+        ("http://localhost:123", False),
+    ],
+)
 async def test_reuse_only_never_installs_or_spawns(tmp_path, monkeypatch, url, enabled):
     healthy = False
 
@@ -280,7 +319,9 @@ async def test_initial_start_and_failure_cleanup(tmp_path, monkeypatch, behavior
     monkeypatch.setattr(launcher, "probe_health", health)
     monkeypatch.setattr(launcher, "instance_ready", lambda *_: True)
     monkeypatch.setattr(launcher, "spawn_process", spawn)
-    results = await asyncio.gather(*(service.ensure_ready(wait_timeout=1) for _ in range(2)))
+    results = await asyncio.gather(
+        *(service.ensure_ready(wait_timeout=1) for _ in range(2))
+    )
     assert calls == 1
     assert all(r.ok for r in results) == (behavior == "ready")
     if behavior != "ready":

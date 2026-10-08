@@ -1,4 +1,5 @@
 """独立分析服务的单任务准备和自有进程生命周期。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -48,9 +49,15 @@ async def probe_health(base_url: str) -> bool:
 
 class ServiceLauncher:
     def __init__(
-        self, base_url: str, archive_url: str | None, extras: str,
-        auto_install: bool, timeout: float, data_dir: Path,
-        llm: dict[str, Any] | None = None, runner: Runner | None = None,
+        self,
+        base_url: str,
+        archive_url: str | None,
+        extras: str,
+        auto_install: bool,
+        timeout: float,
+        data_dir: Path,
+        llm: dict[str, Any] | None = None,
+        runner: Runner | None = None,
         llm_loader: Callable[[], Awaitable[dict[str, Any] | None]] | None = None,
     ):
         parsed = urlsplit(base_url)
@@ -59,14 +66,20 @@ class ServiceLauncher:
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("base_url 不能包含认证信息、查询串或片段")
         self._host = parsed.hostname
-        self._port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+        self._port = (
+            parsed.port
+            if parsed.port is not None
+            else (443 if parsed.scheme == "https" else 80)
+        )
         if not 1 <= self._port <= 65535:
             raise ValueError("服务端口必须位于 1 到 65535")
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("启动等待上限必须大于 0")
-        self._can_start = (parsed.scheme == "http"
-                           and self._host in {"localhost", "127.0.0.1", "::1"}
-                           and parsed.path in {"", "/"})
+        self._can_start = (
+            parsed.scheme == "http"
+            and self._host in {"localhost", "127.0.0.1", "::1"}
+            and parsed.path in {"", "/"}
+        )
         self.base_url = base_url.rstrip("/")
         self.archive_url = archive_url
         self.extras = extras
@@ -90,7 +103,9 @@ class ServiceLauncher:
     def state(self) -> State:
         return self._state
 
-    def _get_or_create_task(self, allow_install: bool) -> asyncio.Task[ReadyOutcome] | None:
+    def _get_or_create_task(
+        self, allow_install: bool
+    ) -> asyncio.Task[ReadyOutcome] | None:
         """同一事件循环内，无 await 的区段保证只创建一个准备任务。"""
         if self._stopped:
             return None
@@ -156,7 +171,9 @@ class ServiceLauncher:
         try:
             config = yaml.safe_load(path.read_text("utf-8"))
         except (OSError, yaml.YAMLError) as exc:
-            return StepResult(False, f"配置文件无法解析，请修复原文件（{type(exc).__name__}）")
+            return StepResult(
+                False, f"配置文件无法解析，请修复原文件（{type(exc).__name__}）"
+            )
         if not isinstance(config, dict):
             return StepResult(False, "配置文件必须为 YAML 对象，请修复原文件")
         for key in ("llm", "api"):
@@ -173,7 +190,9 @@ class ServiceLauncher:
                 self._reason = ""
                 return ReadyOutcome(True)
             if not self._can_start or not self.auto_install:
-                return self._failure("分析服务未启动，此地址或配置仅允许复用正在运行的服务")
+                return self._failure(
+                    "分析服务未启动，此地址或配置仅允许复用正在运行的服务"
+                )
             if self._process is not None:
                 if self._process.returncode is None:
                     return self._failure("自建进程仍运行，健康探测失败，请查看插件日志")
@@ -181,11 +200,16 @@ class ServiceLauncher:
             self._state = "starting"
             if not instance_ready(self.instance, self.extras):
                 if not allow_install:
-                    return self._failure(self._reason or "安装尚未完成，请重载插件后查看安装日志")
+                    return self._failure(
+                        self._reason or "安装尚未完成，请重载插件后查看安装日志"
+                    )
                 if self._runner is None:
                     return self._failure("未配置安装命令执行器")
                 result = await ensure_instance(
-                    self.instance, self.archive_url, self.extras, runner=self._runner,
+                    self.instance,
+                    self.archive_url,
+                    self.extras,
+                    runner=self._runner,
                 )
                 if not result.ok:
                     return self._failure(result.detail)
@@ -196,7 +220,9 @@ class ServiceLauncher:
                 return ReadyOutcome(False, "插件已停用")
             return await self._start()
         except Exception as exc:  # noqa: BLE001 — 服务准备隔离边界，后台失败转为可见诊断
-            return self._failure(f"服务准备失败：{type(exc).__name__}：{redact(str(exc))}")
+            return self._failure(
+                f"服务准备失败：{type(exc).__name__}：{redact(str(exc))}"
+            )
 
     async def _cleanup_process(self) -> None:
         """只使用保存的句柄；退出未确认时保留所有权供再次清理。"""
@@ -259,7 +285,9 @@ class ServiceLauncher:
                         pending = ""
                         dropping = True
                 if index < len(segments) - 1:
-                    write_line("[过长服务日志行已略去]" if dropping else redact(pending))
+                    write_line(
+                        "[过长服务日志行已略去]" if dropping else redact(pending)
+                    )
                     pending = ""
                     dropping = False
 
@@ -285,11 +313,19 @@ class ServiceLauncher:
     async def _start(self) -> ReadyOutcome:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._log = (self.data_dir / "service.log").open("a", encoding="utf-8")
-        creation = asyncio.create_task(spawn_process(
-            str(venv_launcher(self.instance)), "run", "--host", self._host,
-            "--port", str(self._port), cwd=self.instance,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        ))
+        creation = asyncio.create_task(
+            spawn_process(
+                str(venv_launcher(self.instance)),
+                "run",
+                "--host",
+                self._host,
+                "--port",
+                str(self._port),
+                cwd=self.instance,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        )
         try:
             try:
                 proc = await asyncio.shield(creation)
@@ -303,13 +339,19 @@ class ServiceLauncher:
             while True:
                 if proc.returncode is not None:
                     await self._cleanup_process()
-                    return self._failure(f"分析服务提前退出（退出码 {proc.returncode}），详见插件日志")
+                    return self._failure(
+                        f"分析服务提前退出（退出码 {proc.returncode}），详见插件日志"
+                    )
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     await self._cleanup_process()
-                    return self._failure(f"分析服务启动超时（{self.timeout:g} 秒），详见插件日志")
+                    return self._failure(
+                        f"分析服务启动超时（{self.timeout:g} 秒），详见插件日志"
+                    )
                 try:
-                    healthy = await asyncio.wait_for(probe_health(self.base_url), remaining)
+                    healthy = await asyncio.wait_for(
+                        probe_health(self.base_url), remaining
+                    )
                 except TimeoutError:
                     healthy = False
                 if healthy:

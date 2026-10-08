@@ -30,7 +30,9 @@ def resolve_effective_timeout(config_timeout: int, tool_timeout: int | None) -> 
     """收敛生效超时：min(配置值, AstrBot 工具超时 − 15)，下限 10 秒。"""
     if tool_timeout is None:
         return max(MIN_EFFECTIVE_TIMEOUT, config_timeout)
-    return max(MIN_EFFECTIVE_TIMEOUT, min(config_timeout, tool_timeout - TIMEOUT_MARGIN))
+    return max(
+        MIN_EFFECTIVE_TIMEOUT, min(config_timeout, tool_timeout - TIMEOUT_MARGIN)
+    )
 
 
 def progress_message(symbol: str, effective_timeout: int) -> str:
@@ -62,12 +64,16 @@ class StockRobotClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def analyze_stock(self, symbol: str, effective_timeout: int) -> AnalyzeOutcome:
+    async def analyze_stock(
+        self, symbol: str, effective_timeout: int
+    ) -> AnalyzeOutcome:
         return await self._analyze(
             "/api/v1/analyze", symbol, effective_timeout, is_index=False
         )
 
-    async def analyze_index(self, symbol: str, effective_timeout: int) -> AnalyzeOutcome:
+    async def analyze_index(
+        self, symbol: str, effective_timeout: int
+    ) -> AnalyzeOutcome:
         return await self._analyze(
             "/api/v1/index", symbol, effective_timeout, is_index=True
         )
@@ -99,7 +105,9 @@ class StockRobotClient:
         reports = payload.get("reports")
         if reports is None:
             reports = []
-        if not isinstance(reports, list) or any(not isinstance(item, dict) for item in reports):
+        if not isinstance(reports, list) or any(
+            not isinstance(item, dict) for item in reports
+        ):
             logger.warning("报告库列表结构异常")
             return None
         if not reports:
@@ -111,7 +119,9 @@ class StockRobotClient:
             return None
         return str(report_id) if report_id else None
 
-    async def download_report(self, report_id: str, effective_timeout: int) -> str | None:
+    async def download_report(
+        self, report_id: str, effective_timeout: int
+    ) -> str | None:
         """下载报告 Markdown 原文；失败返回 None。"""
         try:
             resp = await self._http.get(
@@ -148,9 +158,12 @@ class StockRobotClient:
                 "首次分析需拉取数据较慢，可稍后重试或调大插件超时配置",
             )
         except httpx.HTTPError as exc:
-            logger.warning("无法连接分析服务 %s: %s", redact(self._base_url), redact(str(exc)))
+            logger.warning(
+                "无法连接分析服务 %s: %s", redact(self._base_url), redact(str(exc))
+            )
             return AnalyzeOutcome(
-                False, f"❌ 分析服务未启动（{redact(self._base_url)}），请先运行 stock-robot run"
+                False,
+                f"❌ 分析服务未启动（{redact(self._base_url)}），请先运行 stock-robot run",
             )
 
         if resp.status_code == 422:
@@ -171,17 +184,25 @@ class StockRobotClient:
         try:
             data = resp.json()
         except ValueError as exc:
-            logger.warning("分析响应不是有效 JSON: %s（正文 %.200s）", redact(str(exc)), redact(resp.text)[:200])
+            logger.warning(
+                "分析响应不是有效 JSON: %s（正文 %.200s）",
+                redact(str(exc)),
+                redact(resp.text)[:200],
+            )
             return AnalyzeOutcome(False, "❌ 分析结果异常，已记录日志")
 
         if not isinstance(data, dict):
             logger.warning("分析响应结构异常: %.200s", redact(resp.text)[:200])
             return AnalyzeOutcome(False, "❌ 分析结果异常，已记录日志")
-        
+
         # 指数专用校验
         if is_index and not (data.get("reports") or []):
             errors = data.get("errors") or []
-            detail = "；".join(str(e) for e in errors) if isinstance(errors, list) else str(errors)
+            detail = (
+                "；".join(str(e) for e in errors)
+                if isinstance(errors, list)
+                else str(errors)
+            )
             detail = redact(detail)[:200] or "无可用结果"
             logger.warning("指数分析无结果: %s", detail)
             return AnalyzeOutcome(False, f"❌ 指数分析失败：{detail}")
