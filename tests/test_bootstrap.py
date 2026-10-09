@@ -5,6 +5,7 @@ import ctypes
 import importlib
 import io
 import json
+import logging
 import sys
 import zipfile
 from pathlib import Path
@@ -21,6 +22,94 @@ package = ModuleType(PACKAGE)
 package.__path__ = [str(ROOT)]
 sys.modules[PACKAGE] = package
 bootstrap = importlib.import_module(f"{PACKAGE}.bootstrap")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uv", [None, "C:/uv.exe"])
+async def test_custom_index_and_install_stages(tmp_path, monkeypatch, uv):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "pyproject.toml").touch()
+    (source / "requirements-core.lock.txt").touch()
+    (source / ".bootstrap-source.json").write_text(
+        json.dumps(
+            {
+                "archive_url": "https://example.org/a.zip",
+                "archive_sha256": "a" * 64,
+            }
+        )
+    )
+    commands = []
+    progress = bootstrap.InstallProgress(tmp_path / "service.log")
+
+    async def runner(cmd, cwd):
+        commands.append((cmd, progress.stage))
+        bootstrap.venv_python(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        bootstrap.venv_python(tmp_path).touch()
+        bootstrap.venv_launcher(tmp_path).touch()
+        return 0, ""
+
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _: uv)
+    result = await bootstrap.ensure_instance(
+        tmp_path,
+        None,
+        "",
+        runner=runner,
+        progress=progress,
+        package_index_url="https://example.org/simple",
+    )
+    assert result.ok
+    installs = [cmd for cmd, _ in commands if "install" in cmd]
+    assert len(installs) == 2
+    assert all(
+        cmd[cmd.index("--index-url") + 1] == "https://example.org/simple"
+        for cmd in installs
+    )
+    assert all(stage == 3 for cmd, stage in commands if "install" in cmd)
+    assert commands[-1][1] == 4
+    log = progress.log_path.read_text("utf-8")
+    assert all(f"[{stage}/5]" in log for stage in range(1, 5))
+
+
+@pytest.mark.asyncio
+async def test_install_timeout_keeps_artifacts_and_reports_stage(tmp_path, monkeypatch):
+    async def download(*args, **kwargs):
+        (tmp_path / "src").mkdir()
+        return bootstrap.StepResult(True)
+
+    async def env(*args, progress, **kwargs):
+        progress.enter(3, "安装依赖")
+        progress.record(
+            "Downloading scipy from https://user:secret@example.org/file?token=secret"
+        )
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(bootstrap, "download_source", download)
+    monkeypatch.setattr(bootstrap, "make_env", env)
+    result = await bootstrap.ensure_instance(
+        tmp_path,
+        None,
+        "",
+        runner=None,
+        install_timeout=0.02,
+        progress=bootstrap.InstallProgress(tmp_path / "service.log"),
+    )
+    assert not result.ok
+    assert "后台安装超时" in result.detail and "[3/5]" in result.detail
+    assert "scipy" in result.detail and "secret" not in result.detail
+    assert (tmp_path / "src").exists()
+    assert not (tmp_path / "install-state.json").exists()
+
+
+def test_progress_heartbeat_without_output_and_redaction(tmp_path, caplog):
+    progress = bootstrap.InstallProgress(tmp_path / "service.log")
+    with caplog.at_level(logging.INFO, logger="plugin-test"):
+        progress.enter(3, "安装依赖")
+        progress.heartbeat()
+        progress.record("api_key=secret")
+        progress.heartbeat()
+    assert "等待安装程序输出" in caplog.text
+    assert "[3/5]" in caplog.text and "secret" not in caplog.text
 
 
 def archive(member="project/pyproject.toml"):
@@ -356,7 +445,7 @@ async def test_cancel_command_reaps_child(tmp_path, monkeypatch, cancel):
     else:
         code, detail = await task
         assert code == 1
-        assert "截止时间" in detail
+        assert "安装命令超时" in detail and "0.5 秒" in detail
     if sys.platform == "win32":
         import ctypes
 

@@ -16,6 +16,8 @@ import yaml
 from astrbot.api import logger
 
 from .bootstrap import (
+    INSTALL_TIMEOUT_SECONDS,
+    InstallProgress,
     Runner,
     StepResult,
     ensure_instance,
@@ -34,6 +36,7 @@ State = Literal["idle", "starting", "ready", "failed", "stopped"]
 class ReadyOutcome:
     ok: bool
     reason: str = ""
+    pending: bool = False
 
 
 async def probe_health(base_url: str) -> bool:
@@ -59,6 +62,9 @@ class ServiceLauncher:
         llm: dict[str, Any] | None = None,
         runner: Runner | None = None,
         llm_loader: Callable[[], Awaitable[dict[str, Any] | None]] | None = None,
+        install_timeout: float = INSTALL_TIMEOUT_SECONDS,
+        package_index_url: str = "",
+        progress: InstallProgress | None = None,
     ):
         parsed = urlsplit(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -75,6 +81,12 @@ class ServiceLauncher:
             raise ValueError("服务端口必须位于 1 到 65535")
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("启动等待上限必须大于 0")
+        if not math.isfinite(install_timeout) or install_timeout <= 0:
+            raise ValueError("install_timeout_seconds 必须为大于 0 的有限秒数")
+        if package_index_url:
+            index = urlsplit(package_index_url)
+            if index.scheme not in {"http", "https"} or not index.hostname:
+                raise ValueError("package_index_url 必须是有效 HTTP/HTTPS 包源地址")
         self._can_start = (
             parsed.scheme == "http"
             and self._host in {"localhost", "127.0.0.1", "::1"}
@@ -85,6 +97,9 @@ class ServiceLauncher:
         self.extras = extras
         self.auto_install = auto_install
         self.timeout = timeout
+        self.install_timeout = install_timeout
+        self.package_index_url = package_index_url
+        self.progress = progress or InstallProgress(data_dir / "service.log")
         self.data_dir = data_dir
         self.instance = data_dir / "instance"
         self._llm = llm
@@ -133,9 +148,25 @@ class ServiceLauncher:
         try:
             return await asyncio.wait_for(asyncio.shield(task), timeout=wait_timeout)
         except TimeoutError:
-            return ReadyOutcome(False, "服务仍在安装或启动中，详见插件日志")
+            return ReadyOutcome(
+                False,
+                f"{self.progress.describe()}；本次等待结束，后台继续准备，请稍后再试；详见 service.log",
+                pending=True,
+            )
 
     def _failure(self, reason: str) -> ReadyOutcome:
+        if self.progress.stage and not reason.startswith("后台安装超时"):
+            reason = f"{self.progress.describe()}；{reason}"
+            if self.progress.stage == 1:
+                reason += (
+                    "；请检查 GitHub 源码地址与网络后重载；详见插件日志和 service.log"
+                )
+            elif self.progress.stage == 3:
+                reason += (
+                    "；请检查 package_index_url 和安装输出后重载；详见 service.log"
+                )
+            else:
+                reason += "；详见插件日志和 service.log"
         self._reason = redact(reason)
         if not self._stopped:
             self._state = "failed"
@@ -182,6 +213,7 @@ class ServiceLauncher:
         return StepResult(True)
 
     async def _prepare(self, allow_install: bool) -> ReadyOutcome:
+        heartbeat: asyncio.Task[None] | None = None
         try:
             if self._stopped:
                 return ReadyOutcome(False, "插件已停用")
@@ -198,6 +230,7 @@ class ServiceLauncher:
                     return self._failure("自建进程仍运行，健康探测失败，请查看插件日志")
                 await self._cleanup_process()
             self._state = "starting"
+            heartbeat = asyncio.create_task(self._report_progress())
             if not instance_ready(self.instance, self.extras):
                 if not allow_install:
                     return self._failure(
@@ -210,19 +243,39 @@ class ServiceLauncher:
                     self.archive_url,
                     self.extras,
                     runner=self._runner,
+                    install_timeout=self.install_timeout,
+                    package_index_url=self.package_index_url,
+                    progress=self.progress,
                 )
                 if not result.ok:
                     return self._failure(result.detail)
+            self.progress.enter(4, "检查程序与配置")
             result = await self._configure(allow_install)
             if not result.ok:
                 return self._failure(result.detail)
             if self._stopped:
                 return ReadyOutcome(False, "插件已停用")
-            return await self._start()
+            self.progress.enter(5, "启动服务")
+            outcome = await self._start()
+            if outcome.ok:
+                self.progress.emit("分析服务已就绪；" + self.progress.describe())
+            return outcome
         except Exception as exc:  # noqa: BLE001 — 服务准备隔离边界，后台失败转为可见诊断
             return self._failure(
                 f"服务准备失败：{type(exc).__name__}：{redact(str(exc))}"
             )
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+                try:
+                    await heartbeat
+                except asyncio.CancelledError:
+                    pass
+
+    async def _report_progress(self) -> None:
+        while True:
+            await asyncio.sleep(30)
+            self.progress.heartbeat()
 
     async def _cleanup_process(self) -> None:
         """只使用保存的句柄；退出未确认时保留所有权供再次清理。"""
@@ -268,6 +321,7 @@ class ServiceLauncher:
             if write_failed:
                 return
             try:
+                self.progress.record(line)
                 output.write(line + "\n")
                 output.flush()
             except OSError as exc:

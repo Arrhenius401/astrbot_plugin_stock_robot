@@ -93,6 +93,7 @@ async def test_shared_task_waiters_timeout_and_cancel_do_not_cancel_preparation(
         *(service.ensure_ready(wait_timeout=0.01) for _ in range(2))
     )
     assert not any(result.ok for result in results)
+    assert all(result.pending and "后台继续准备" in result.reason for result in results)
     waiter = asyncio.create_task(service.ensure_ready(wait_timeout=1))
     await asyncio.sleep(0)
     waiter.cancel()
@@ -102,6 +103,26 @@ async def test_shared_task_waiters_timeout_and_cancel_do_not_cancel_preparation(
     gate.set()
     assert (await service.ensure_ready(wait_timeout=1)).ok
     assert calls == 1
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_slow_prepare_reports_current_stage_and_continues(tmp_path, monkeypatch):
+    service = make_launcher(tmp_path, install_timeout=3600)
+    gate = asyncio.Event()
+
+    async def prepare(allow_install):
+        service.progress.enter(3, "安装依赖")
+        await gate.wait()
+        return launcher.ReadyOutcome(True)
+
+    monkeypatch.setattr(service, "_prepare", prepare)
+    service.start_background()
+    outcome = await service.ensure_ready(wait_timeout=0.01)
+    assert outcome.pending and "[3/5]" in outcome.reason
+    assert not service._task.done()
+    gate.set()
+    assert (await service.ensure_ready(wait_timeout=1)).ok
     await service.stop()
 
 

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="股票分析助手" width="128">
+  <img src="https://raw.githubusercontent.com/Arrhenius401/astrbot_plugin_stock_robot/master/logo.png" alt="股票分析助手" width="128">
 </p>
 
 <h1 align="center">股票分析助手</h1>
@@ -64,6 +64,8 @@
 | `web_url` | 留空 | 设置用户能打开的报告库地址；留空使用 `base_url`，仅在图片失败时发送。 |
 | `timeout_seconds` | `100` 秒 | 分析经常超时时调整；实际还受 AstrBot 工具调用超时限制。 |
 | `startup_timeout_seconds` | `60` 秒 | 调整每次调用等待服务就绪的时间。 |
+| `install_timeout_seconds` | `2400` 秒（40 分钟） | 后台安装总时限；慢速首次安装可增大，修改后重载。 |
+| `package_index_url` | 留空 | 指定服务器可快速访问的 Python simple 包源，同时用于 uv 和 pip；留空沿用安装工具设置。 |
 | `auto_install` | `true` | 关闭后只连接已运行的服务，不安装或启动服务。 |
 | `bootstrap_extras` | 留空 | 需要检索依赖时填 `rag`；首次下载较大，通常保持留空。 |
 | `source_archive_url` | 留空 | 需要指定固定版本或提交时填源码 ZIP 地址；通常留空使用最新正式发布版。 |
@@ -91,6 +93,12 @@
 ### 首次使用提示服务未就绪
 
 首次安装可能需要较长时间，后台准备会继续进行，稍后重新发送请求即可。持续未就绪时，可在 `service.log` 中查看下载、依赖安装和启动情况。
+
+AstrBot 主日志和 `service.log` 会记录 `[1/5] 下载源码`、`[2/5] 创建环境`、`[3/5] 安装依赖`、`[4/5] 检查程序`、`[5/5] 启动服务`。序号表示当前阶段，各阶段耗时不同，不代表完成百分比。准备期间每 30 秒记录总耗时及最近一条脱敏输出；没有新输出也会说明正在等待。
+
+聊天显示“本次等待结束，后台继续准备”时，安装任务仍在运行；“后台安装超时”则表示已达到 `install_timeout_seconds` 上限。错误会包含所在阶段、耗时及可用的最近输出。服务启动仍使用 `startup_timeout_seconds` 作为独立时限。
+
+如果依赖解析或下载很慢，可以设置 `package_index_url`，并按需增大 `install_timeout_seconds`，随后重载插件。已校验源码、虚拟环境和安装工具缓存会保留并复用，复用缓存不保证未下载完的包能按字节续传。成功安装的实例不会因修改包源而自动重装。
 
 ### 机器人没有调用插件
 

@@ -7,6 +7,7 @@ import codecs
 import ctypes
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -15,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -36,9 +38,55 @@ LATEST_RELEASE_URL = "https://github.com/Arrhenius401/stock_robot/releases/lates
 SOURCE_ARCHIVE_URL = (
     "https://codeload.github.com/Arrhenius401/stock_robot/zip/refs/tags/"
 )
-INSTALL_TIMEOUT_SECONDS = 1200
+INSTALL_TIMEOUT_SECONDS = 2400
 DOWNLOAD_TIMEOUT_SECONDS = 300
 Runner = Callable[[list[str], Path], Awaitable[tuple[int, str]]]
+
+
+class InstallProgress:
+    """真实阶段与脱敏输出；阶段序号不代表完成百分比。"""
+
+    def __init__(self, log_path: Path):
+        self.log_path = log_path
+        self.started = time.monotonic()
+        self.stage = 0
+        self.label = "准备安装"
+        self.latest = ""
+        self.latest_at: float | None = None
+
+    def describe(self) -> str:
+        elapsed = int(time.monotonic() - self.started)
+        prefix = f"[{self.stage}/5] " if self.stage else ""
+        return f"{prefix}{self.label}，已用时 {elapsed // 60} 分 {elapsed % 60} 秒"
+
+    def emit(self, message: str) -> None:
+        safe = redact(message)
+        logger.info("%s", safe)
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as output:
+                output.write(safe + "\n")
+        except OSError as exc:
+            logger.warning("安装进度日志写入失败：%s", type(exc).__name__)
+
+    def enter(self, stage: int, label: str) -> None:
+        if stage == 1:
+            self.started = time.monotonic()
+        self.stage, self.label, self.latest = stage, label, ""
+        self.latest_at = None
+        self.emit(self.describe())
+
+    def record(self, line: str) -> None:
+        if line.strip():
+            self.latest = redact(line.strip())[:512]
+            self.latest_at = time.monotonic()
+
+    def heartbeat(self) -> None:
+        detail = "；等待安装程序输出"
+        if self.latest_at is not None:
+            age = int(time.monotonic() - self.latest_at)
+            detail = f"；最近输出（{age} 秒前）：{self.latest}"
+        self.emit(self.describe() + detail)
 
 
 @dataclass(frozen=True)
@@ -293,8 +341,16 @@ async def reap_process(process: asyncio.subprocess.Process) -> None:
     _owned_jobs.pop(process, None)
 
 
-async def run_command(cmd: list[str], cwd: Path, *, log_path: Path) -> tuple[int, str]:
+async def run_command(
+    cmd: list[str],
+    cwd: Path,
+    *,
+    log_path: Path,
+    timeout: float | None = None,
+    progress: InstallProgress | None = None,
+) -> tuple[int, str]:
     """实时记录脱敏输出；取消与超时均等待自建子进程回收。"""
+    timeout = INSTALL_TIMEOUT_SECONDS if timeout is None else timeout
     tail: deque[str] = deque(maxlen=30)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     creation = asyncio.create_task(
@@ -338,21 +394,25 @@ async def run_command(cmd: list[str], cwd: Path, *, log_path: Path) -> tuple[int
                     output.write(safe + "\n")
                     output.flush()
                     tail.append(safe)
+                    if progress is not None:
+                        progress.record(safe)
             pending += decoder.decode(b"", final=True)
             if pending or dropping:
                 safe = "[过长安装日志行已略去]" if dropping else redact(pending)
                 output.write(safe + "\n")
                 tail.append(safe)
+                if progress is not None:
+                    progress.record(safe)
             await process.wait()
 
     try:
-        await asyncio.wait_for(consume(), INSTALL_TIMEOUT_SECONDS)
+        await asyncio.wait_for(consume(), timeout)
     except asyncio.CancelledError:
         await reap_process(process)
         raise
     except TimeoutError:
         await reap_process(process)
-        return 1, "安装命令超过截止时间"
+        return 1, f"安装命令超时（上限 {timeout:g} 秒）；最近输出：" + "\n".join(tail)
     except OSError:
         await reap_process(process)
         raise
@@ -582,11 +642,23 @@ async def download_source(
         NotImplementedError,
         RuntimeError,
     ) as exc:
-        logger.warning("源码准备失败：%s", redact(str(exc)))
-        return StepResult(False, f"源码准备失败：{redact(str(exc))}")
+        reason = (
+            f"源码下载超时（总上限 {DOWNLOAD_TIMEOUT_SECONDS} 秒，单次网络等待上限 30 秒）"
+            if isinstance(exc, (TimeoutError, httpx.TimeoutException))
+            else f"{type(exc).__name__}：{redact(str(exc))}"
+        )
+        logger.warning("源码准备失败：%s", reason)
+        return StepResult(False, f"源码准备失败：{reason}")
 
 
-async def make_env(instance: Path, extras: str, *, runner: Runner) -> StepResult:
+async def make_env(
+    instance: Path,
+    extras: str,
+    *,
+    runner: Runner,
+    package_index_url: str = "",
+    progress: InstallProgress | None = None,
+) -> StepResult:
     source = instance / "src"
     python = venv_python(instance)
     uv = shutil.which("uv")
@@ -595,6 +667,8 @@ async def make_env(instance: Path, extras: str, *, runner: Runner) -> StepResult
     )
     if not requirements.is_file():
         return StepResult(False, "源码缺少锁定依赖清单")
+    if progress is not None:
+        progress.enter(2, "创建环境")
     if not python.is_file():
         command = (
             [uv, "venv", "--python", sys.executable, str(instance / "venv")]
@@ -610,11 +684,15 @@ async def make_env(instance: Path, extras: str, *, runner: Runner) -> StepResult
             code, output = await runner([str(python), "-m", "ensurepip"], instance)
             if code:
                 return StepResult(False, f"补装 pip 失败：{redact(output)}")
+    if progress is not None:
+        progress.enter(3, "安装依赖")
     prefix = (
         [uv, "pip", "install", "--python", str(python)]
         if uv
         else [str(python), "-m", "pip", "install"]
     )
+    if package_index_url:
+        prefix += ["--index-url", package_index_url]
     for arguments, stage in [
         (["--require-hashes", "-r", str(requirements)], "锁定依赖安装"),
         (["--no-deps", "-e", "."], "项目安装"),
@@ -689,20 +767,39 @@ def instance_ready(instance: Path, extras: str) -> bool:
 
 
 async def ensure_instance(
-    instance: Path, archive_url: str | None, extras: str, *, runner: Runner
+    instance: Path,
+    archive_url: str | None,
+    extras: str,
+    *,
+    runner: Runner,
+    install_timeout: float = INSTALL_TIMEOUT_SECONDS,
+    package_index_url: str = "",
+    progress: InstallProgress | None = None,
 ) -> StepResult:
+    if not math.isfinite(install_timeout) or install_timeout <= 0:
+        return StepResult(False, "安装总时限必须为大于 0 的有限秒数")
     if extras not in {"", "rag"}:
         return StepResult(False, "bootstrap_extras 仅接受空或 rag")
     if instance_ready(instance, extras):
         return StepResult(True)
     try:
-        async with asyncio.timeout(INSTALL_TIMEOUT_SECONDS):
+        async with asyncio.timeout(install_timeout):
+            if progress is not None:
+                progress.enter(1, "下载源码（已有校验源码将复用）")
             result = await download_source(archive_url, instance, extras=extras)
             if not result.ok:
                 return result
-            result = await make_env(instance, extras, runner=runner)
+            result = await make_env(
+                instance,
+                extras,
+                runner=runner,
+                package_index_url=package_index_url,
+                progress=progress,
+            )
             if not result.ok:
                 return result
+            if progress is not None:
+                progress.enter(4, "检查程序")
             code, output = await runner(
                 [str(venv_launcher(instance)), "--help"], instance
             )
@@ -721,6 +818,15 @@ async def ensure_instance(
                 instance_ready(instance, extras),
                 "" if instance_ready(instance, extras) else "安装产物不完整",
             )
-    except (OSError, TimeoutError) as exc:
+    except TimeoutError:
+        detail = f"后台安装超时（总时限 {install_timeout:g} 秒）"
+        if progress is not None:
+            detail += f"：{progress.describe()}"
+            if progress.latest:
+                detail += f"；最近输出：{progress.latest}"
+        detail += "；请检查包源和网络，可增加 install_timeout_seconds 后重载，已有源码和缓存会复用；详见 service.log"
+        logger.warning("%s", detail)
+        return StepResult(False, detail)
+    except OSError as exc:
         logger.warning("实例准备失败：%s", redact(str(exc)))
         return StepResult(False, f"实例准备失败：{redact(str(exc))}")
