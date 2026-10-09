@@ -25,6 +25,14 @@
     "description": "自动准备本机服务", "type": "bool", "default": true,
     "hint": "关闭后只复用已运行服务，不安装也不启动已有实例"
   },
+  "install_timeout_seconds": {
+    "description": "后台安装总时限（秒）", "type": "int", "default": 2400,
+    "hint": "默认 40 分钟，包含源码下载与环境安装；慢网络可增大；与聊天等待和服务启动时限分别控制，修改后重载"
+  },
+  "package_index_url": {
+    "description": "Python 依赖包源（可选）", "type": "string", "default": "",
+    "hint": "填写 HTTP/HTTPS simple 包源地址，同时用于 uv 和 pip；留空沿用安装工具现有设置；安装失败后修改并重载可复用源码和缓存"
+  },
   "bootstrap_extras": {
     "description": "可选依赖", "type": "string", "default": "",
     "hint": "留空安装核心依赖；rag 另装检索依赖；修改后重载会补装，改回核心不自动卸载旧 RAG 包"

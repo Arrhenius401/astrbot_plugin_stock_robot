@@ -11,7 +11,12 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
-from .bootstrap import DEFAULT_ARCHIVE_URL, run_command
+from .bootstrap import (
+    DEFAULT_ARCHIVE_URL,
+    INSTALL_TIMEOUT_SECONDS,
+    InstallProgress,
+    run_command,
+)
 from .client import (
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT_SECONDS,
@@ -99,11 +104,17 @@ class StockRobotPlugin(Star):
         self._startup_timeout = float(self.config.get("startup_timeout_seconds", 60))
         if not math.isfinite(self._startup_timeout) or self._startup_timeout <= 0:
             raise ValueError("startup_timeout_seconds 必须大于 0")
+        self._install_timeout = float(
+            self.config.get("install_timeout_seconds", INSTALL_TIMEOUT_SECONDS)
+        )
+        if not math.isfinite(self._install_timeout) or self._install_timeout <= 0:
+            raise ValueError("install_timeout_seconds 必须为大于 0 的有限秒数")
         self._client = StockRobotClient(base_url, self._timeout_seconds)
 
     async def initialize(self):
         """准备任务由 launcher 持有，插件加载立即返回。"""
         data_dir = Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_stock_robot"
+        progress = InstallProgress(data_dir / "service.log")
         self._launcher = ServiceLauncher(
             base_url=self._base_url,
             archive_url=self.config.get("source_archive_url") or DEFAULT_ARCHIVE_URL,
@@ -112,7 +123,15 @@ class StockRobotPlugin(Star):
             timeout=self._startup_timeout,
             data_dir=data_dir,
             llm=None,
-            runner=partial(run_command, log_path=data_dir / "service.log"),
+            runner=partial(
+                run_command,
+                log_path=data_dir / "service.log",
+                timeout=self._install_timeout,
+                progress=progress,
+            ),
+            install_timeout=self._install_timeout,
+            package_index_url=str(self.config.get("package_index_url") or "").strip(),
+            progress=progress,
             llm_loader=partial(read_llm_config, self.context),
         )
         self._launcher.start_background()
@@ -229,9 +248,12 @@ class StockRobotPlugin(Star):
                 )
             )
             if not outcome.ok:
-                await event.send(
-                    event.plain_result(f"❌ 分析服务未就绪：{outcome.reason}")
+                message = (
+                    f"⏳ 分析服务准备中：{outcome.reason}"
+                    if getattr(outcome, "pending", False)
+                    else f"❌ 分析服务未就绪：{outcome.reason}"
                 )
+                await event.send(event.plain_result(message))
                 note.append(
                     "服务未就绪，原因已发给用户。只回简短确认，不要再调用工具。"
                 )

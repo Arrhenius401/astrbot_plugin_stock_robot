@@ -109,13 +109,14 @@ def test_default_provider_copy(plugin_main, kind, valid):
         assert copied["api_key"] == "secret" and copied["model"] == "model"
 
 
-def test_preparation_failure_never_analyzes(plugin_main):
+@pytest.mark.parametrize("pending", [False, True])
+def test_preparation_failure_never_analyzes(plugin_main, pending):
     async def scenario():
         plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
         calls = []
 
         async def ready(**kwargs):
-            return SimpleNamespace(ok=False, reason="准备失败")
+            return SimpleNamespace(ok=False, reason="准备失败", pending=pending)
 
         async def send(message):
             calls.append(message)
@@ -130,6 +131,7 @@ def test_preparation_failure_never_analyzes(plugin_main):
         try:
             await plugin._run_analysis(event, "stock", "600519", note)
             assert "准备失败" in calls[-1] and "不要再调用工具" in note[-1]
+            assert calls[-1].startswith("⏳" if pending else "❌")
         finally:
             await plugin._client.aclose()
 
