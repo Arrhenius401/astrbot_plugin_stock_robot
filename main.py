@@ -8,7 +8,7 @@ from pathlib import Path
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 from astrbot.core.utils.astrbot_path import (
     get_astrbot_data_path,
     get_astrbot_plugin_data_path,
@@ -89,12 +89,6 @@ async def read_llm_config(context: Context) -> dict | None:
         return None
 
 
-@register(
-    "astrbot_plugin_stock_robot",
-    "Arrhenius401",
-    "在聊天中分析股票与指数，获取完整研报图片。",
-    "1.0.3",
-)
 class StockRobotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
