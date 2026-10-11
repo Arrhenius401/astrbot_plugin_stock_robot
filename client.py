@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -43,10 +44,21 @@ def progress_message(symbol: str, effective_timeout: int) -> str:
     )
 
 
-def fallback_image_message(web_url: str) -> str:
-    """报告图片不可用时的兜底提示（附 Web UI 报告库链接）。"""
-    base = web_url.rstrip("/")
-    return f"❌ 报告图片生成失败，可在 Web UI 报告库查看：{base}/#report-library"
+def public_error_detail(value: str) -> str:
+    """用户提示不携带服务链接、IP 或凭据；详细错误保留在日志。"""
+    text = redact(str(value))
+    text = re.sub(r"https?://\S+", "[地址已隐藏]", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b|\blocalhost(?::\d+)?\b",
+        "[地址已隐藏]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\[[0-9a-fA-F:]+\](?::\d+)?", "[地址已隐藏]", text)
+    text = re.sub(
+        r"\b[A-Za-z]:[\\/]\S+|(?<!\w)/(?:[\w.-]+/)+[\w.-]*", "[路径已隐藏]", text
+    )
+    return text.replace("\n", " ")[:200]
 
 
 class StockRobotClient:
@@ -163,7 +175,7 @@ class StockRobotClient:
             )
             return AnalyzeOutcome(
                 False,
-                f"❌ 分析服务未启动（{redact(self._base_url)}），请先运行 stock-robot run",
+                "❌ 分析服务未启动，请检查插件日志或服务配置",
             )
 
         if resp.status_code == 422:
@@ -179,7 +191,7 @@ class StockRobotClient:
         if resp.status_code >= 400:
             detail = self._error_detail(resp)
             logger.warning("分析请求失败 HTTP %s: %s", resp.status_code, detail)
-            return AnalyzeOutcome(False, f"❌ 分析失败：{detail}")
+            return AnalyzeOutcome(False, f"❌ 分析失败：{public_error_detail(detail)}")
 
         try:
             data = resp.json()
@@ -205,7 +217,9 @@ class StockRobotClient:
             )
             detail = redact(detail)[:200] or "无可用结果"
             logger.warning("指数分析无结果: %s", detail)
-            return AnalyzeOutcome(False, f"❌ 指数分析失败：{detail}")
+            return AnalyzeOutcome(
+                False, f"❌ 指数分析失败：{public_error_detail(detail)}"
+            )
 
         return AnalyzeOutcome(True)
 

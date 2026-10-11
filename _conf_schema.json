@@ -5,12 +5,6 @@
     "default": "http://127.0.0.1:25618",
     "hint": "回环 HTTP 地址可自动准备服务；其他地址仅复用；修改后需重载插件"
   },
-  "web_url": {
-    "description": "报告库链接基址（仅图片生成失败时兜底使用）",
-    "type": "string",
-    "default": "",
-    "hint": "手机访问需填局域网地址，如 http://192.168.1.5:8765；留空则使用 base_url"
-  },
   "timeout_seconds": {
     "description": "分析 HTTP 超时上限（秒）",
     "type": "int",
