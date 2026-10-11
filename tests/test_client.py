@@ -12,8 +12,8 @@ import pytest
 import respx
 from stock_robot_plugin_test.client import (
     StockRobotClient,
-    fallback_image_message,
     progress_message,
+    public_error_detail,
     resolve_effective_timeout,
 )
 
@@ -35,11 +35,15 @@ def plugin_main(monkeypatch, tmp_path):
         def __init__(self, context):
             self.context = context
 
+        async def text_to_image(self, text, return_url=True):
+            raise AssertionError("入口测试不得调用真实转图服务")
+
     star.Star = Star
     star.Context = object
     star.register = lambda *_: lambda cls: cls
     paths = ModuleType("astrbot.core.utils.astrbot_path")
     paths.get_astrbot_plugin_data_path = lambda: str(tmp_path)
+    paths.get_astrbot_data_path = lambda: str(tmp_path / "astrbot-data")
     for name, module in {
         "astrbot": ModuleType("astrbot"),
         "astrbot.api": api,
@@ -138,12 +142,12 @@ def test_preparation_failure_never_analyzes(plugin_main, pending):
     run(scenario())
 
 
-def test_tool_deadline_includes_rendering(plugin_main):
+def test_delivery_survives_analysis_tool_deadline(plugin_main):
     async def scenario():
         plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
-        plugin._resolve_effective_timeout = lambda _: 5.05
+        plugin._resolve_effective_timeout = lambda _: 5.5
         messages = []
-        rendering_cancelled = False
+        rendered = asyncio.Event()
 
         async def analyze(*_):
             return SimpleNamespace(ok=True)
@@ -155,11 +159,12 @@ def test_tool_deadline_includes_rendering(plugin_main):
             return "markdown"
 
         async def render(*_):
-            nonlocal rendering_cancelled
-            try:
-                await asyncio.sleep(1)
-            finally:
-                rendering_cancelled = True
+            await asyncio.sleep(0.6)
+            rendered.set()
+            return SimpleNamespace(png=b"png", width=1200, height=5000)
+
+        async def send_image(_, image):
+            messages.append(f"image:{image.png!r}")
 
         async def send(value):
             messages.append(value)
@@ -167,7 +172,8 @@ def test_tool_deadline_includes_rendering(plugin_main):
         plugin._client.analyze_stock = analyze
         plugin._client.latest_report_id = report_id
         plugin._client.download_report = download
-        plugin.text_to_image = render
+        plugin._delivery._render = render
+        plugin._delivery._send_image = send_image
         event = SimpleNamespace(
             send=send,
             plain_result=lambda value: value,
@@ -176,8 +182,11 @@ def test_tool_deadline_includes_rendering(plugin_main):
         note = []
         try:
             await plugin._run_analysis(event, "stock", "600519", note)
-            assert rendering_cancelled and "时间已耗尽" in messages[-1]
-            assert not any(message.startswith("image:") for message in messages)
+            assert not rendered.is_set() and "正在后台发送" in note[-1]
+            await asyncio.gather(*plugin._delivery._tasks)
+            assert rendered.is_set() and messages[-1].startswith("image:")
+            assert not any("时间已耗尽" in message for message in messages)
+            assert plugin._delivery._reserved == 0
         finally:
             await plugin._client.aclose()
 
@@ -199,7 +208,10 @@ def test_terminate_closes_client_even_if_cleanup_fails(plugin_main):
     run(scenario())
 
 
-def test_initialize_does_not_wait_for_provider(plugin_main, monkeypatch):
+@pytest.mark.parametrize("font_path_failure", [False, True])
+def test_initialize_does_not_wait_for_provider(
+    plugin_main, monkeypatch, font_path_failure, caplog
+):
     async def scenario():
         started = []
 
@@ -217,12 +229,25 @@ def test_initialize_does_not_wait_for_provider(plugin_main, monkeypatch):
             raise AssertionError("initialize 不应等待模型接口")
 
         monkeypatch.setattr(plugin_main, "ServiceLauncher", Launcher)
+        if font_path_failure:
+
+            def unavailable_path():
+                raise OSError("数据目录不可访问")
+
+            monkeypatch.setattr(plugin_main, "get_astrbot_data_path", unavailable_path)
         plugin = plugin_main.StockRobotPlugin(
             SimpleNamespace(get_using_provider_async=forbidden), {}
         )
         try:
             await plugin.initialize()
             assert started == [True]
+            if font_path_failure:
+                assert "无法准备 AstrBot 中文字体" in caplog.text
+            else:
+                assert (
+                    Path(plugin_main.get_astrbot_data_path()) / "font.ttf"
+                ).is_file()
+            assert plugin._delivery.renderer.native_render == plugin.text_to_image
         finally:
             await plugin.terminate()
 
@@ -294,7 +319,7 @@ def test_analyze_stock_connect_error():
     outcome = run(call_stock("600519"))
     assert outcome.ok is False
     assert "分析服务未启动" in outcome.user_message
-    assert BASE in outcome.user_message
+    assert BASE not in outcome.user_message
 
 
 @respx.mock
@@ -449,10 +474,56 @@ def test_progress_message_contains_symbol_and_timeout():
     assert "100" in text
 
 
-def test_fallback_image_message_strips_trailing_slash():
-    text = fallback_image_message("http://192.168.1.5:8765/")
-    assert text.endswith("/#report-library")
-    assert "192.168.1.5:8765/#report-library" in text
+def test_public_error_hides_links_ip_and_credentials():
+    text = public_error_detail(
+        "请求失败 http://192.168.1.5:8765/path 127.0.0.1:25618 api_key=TEST_SECRET_VALUE"
+    )
+    assert "http" not in text and "127.0.0.1" not in text
+    assert "TEST_SECRET_VALUE" not in text and "请求失败" in text
+
+
+def test_public_error_hides_ipv6_and_internal_paths():
+    text = public_error_detail(
+        r"安装失败 [::1]:25618 /AstrBot/data/plugin_data/file C:\Users\name\file"
+    )
+    assert "::1" not in text and "AstrBot" not in text and "Users" not in text
+    assert "安装失败" in text
+
+
+def test_empty_report_never_sends_blank_image_or_link(plugin_main):
+    async def scenario():
+        plugin = plugin_main.StockRobotPlugin(
+            SimpleNamespace(), {"web_url": "http://never-send.invalid"}
+        )
+
+        async def analyze(*_):
+            return SimpleNamespace(ok=True)
+
+        async def report_id(*_):
+            return "report"
+
+        async def download(*_):
+            return "   \n"
+
+        messages = []
+
+        async def send(message):
+            messages.append(message)
+
+        event = SimpleNamespace(send=send, plain_result=lambda value: value)
+        plugin._client.analyze_stock = analyze
+        plugin._client.latest_report_id = report_id
+        plugin._client.download_report = download
+        try:
+            note = []
+            await plugin._run_analysis(event, "stock", "600519", note)
+            assert "未能取回报告" in messages[-1]
+            assert all("http" not in message for message in messages)
+            assert not plugin._delivery._tasks and plugin._delivery._reserved == 0
+        finally:
+            await plugin.terminate()
+
+    run(scenario())
 
 
 @respx.mock

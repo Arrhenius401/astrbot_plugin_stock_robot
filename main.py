@@ -9,7 +9,10 @@ from pathlib import Path
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
-from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
+from astrbot.core.utils.astrbot_path import (
+    get_astrbot_data_path,
+    get_astrbot_plugin_data_path,
+)
 
 from .bootstrap import (
     DEFAULT_ARCHIVE_URL,
@@ -22,11 +25,14 @@ from .client import (
     DEFAULT_TIMEOUT_SECONDS,
     ReportKind,
     StockRobotClient,
-    fallback_image_message,
     progress_message,
+    public_error_detail,
     resolve_effective_timeout,
 )
+from .font_support import ensure_chinese_font
 from .launcher import ServiceLauncher
+from .report_delivery import ReportDelivery
+from .report_renderer import ReportRenderer
 
 
 async def read_llm_config(context: Context) -> dict | None:
@@ -94,9 +100,14 @@ class StockRobotPlugin(Star):
         super().__init__(context)
         self.config = config
         base_url = str(self.config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
-        web_url = str(self.config.get("web_url") or "").rstrip("/") or base_url
         self._base_url = base_url
-        self._web_url = web_url
+        data_dir = Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_stock_robot"
+        self._delivery = ReportDelivery(
+            data_dir / "delivery_tmp", ReportRenderer(self.text_to_image)
+        )
+        self._analysis_locks: dict[tuple[str, str], tuple[asyncio.Lock, int]] = {}
+        self._analysis_tasks: set[asyncio.Task] = set()
+        self._stopping = False
         self._timeout_seconds = int(
             self.config.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS
         )
@@ -114,6 +125,12 @@ class StockRobotPlugin(Star):
     async def initialize(self):
         """准备任务由 launcher 持有，插件加载立即返回。"""
         data_dir = Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_stock_robot"
+        try:
+            await asyncio.to_thread(ensure_chinese_font, Path(get_astrbot_data_path()))
+        except Exception as error:  # noqa: BLE001 — 路径/线程准备失败也不阻止插件加载
+            logger.warning(
+                "无法准备 AstrBot 中文字体: %s: %s", type(error).__name__, error
+            )
         progress = InstallProgress(data_dir / "service.log")
         self._launcher = ServiceLauncher(
             base_url=self._base_url,
@@ -138,9 +155,18 @@ class StockRobotPlugin(Star):
 
     async def terminate(self):
         """先回收任务和自建服务，HTTP 客户端始终关闭。"""
+        self._stopping = True
         try:
-            if self._launcher is not None:
-                await self._launcher.stop()
+            try:
+                for task in list(self._analysis_tasks):
+                    task.cancel()
+                await asyncio.gather(
+                    *list(self._analysis_tasks), return_exceptions=True
+                )
+                await self._delivery.stop()
+            finally:
+                if self._launcher is not None:
+                    await self._launcher.stop()
         finally:
             await self._client.aclose()
 
@@ -199,12 +225,36 @@ class StockRobotPlugin(Star):
         symbol: str,
         note: list[str],
     ) -> None:
-        """整个工具流程共用截止时间，预留五秒发送错误消息。"""
+        """分析／取报告使用工具截止时间；完整报告由受管理任务独立发送。"""
+        if self._stopping or not self._delivery.reserve():
+            await event.send(
+                event.plain_result("⏳ 报告任务较多或插件正在停用，请稍后再试。")
+            )
+            note.append("当前繁忙，已提示用户。只回简短确认，不要再次调用工具。")
+            return
         effective_timeout = self._resolve_effective_timeout(event)
         deadline = asyncio.get_running_loop().time() + effective_timeout - 5
+        submitted = False
+        key = (kind, symbol)
+        lock, users = self._analysis_locks.get(key, (asyncio.Lock(), 0))
+        self._analysis_locks[key] = (lock, users + 1)
+        task = asyncio.current_task()
+        if task is not None:
+            self._analysis_tasks.add(task)
         try:
             async with asyncio.timeout(max(0, effective_timeout - 5)):
-                await self._perform_analysis(event, kind, symbol, note, deadline)
+                # 同一标的的分析与取报告互斥，避免取到另一次调用的“最新报告”。
+                async with lock:
+                    markdown = await self._perform_analysis(
+                        event, kind, symbol, note, deadline
+                    )
+            if markdown is not None:
+                self._delivery.submit(event, markdown, symbol, kind)
+                submitted = True
+                note.append(
+                    "报告已生成，正在后台发送。只回一句简短确认，不要声称已送达，"
+                    "不要复述报告内容，不要再调用工具。"
+                )
         except TimeoutError:
             await asyncio.wait_for(
                 event.send(
@@ -217,6 +267,16 @@ class StockRobotPlugin(Star):
             note.append(
                 "调用时间已耗尽，原因已发给用户。只回简短确认，不要再调用工具。"
             )
+        finally:
+            if not submitted:
+                self._delivery.release()
+            if task is not None:
+                self._analysis_tasks.discard(task)
+            _, users = self._analysis_locks[key]
+            if users == 1:
+                self._analysis_locks.pop(key, None)
+            else:
+                self._analysis_locks[key] = (lock, users - 1)
 
     async def _perform_analysis(
         self,
@@ -225,8 +285,8 @@ class StockRobotPlugin(Star):
         symbol: str,
         note: list[str],
         deadline: float,
-    ) -> None:
-        """执行分析流程：进度 → 分析 → 报告取回 → 图片发送；失败走兜底。
+    ) -> str | None:
+        """执行分析流程：进度 → 分析 → 报告取回；成功返回完整原文。
 
         消息一律用 `await event.send(...)` 显式发送，不用生成器 yield：
         AstrBot 的权限代理（_PermissionGuardedTool）会完整消费插件的异步生成器，
@@ -249,9 +309,9 @@ class StockRobotPlugin(Star):
             )
             if not outcome.ok:
                 message = (
-                    f"⏳ 分析服务准备中：{outcome.reason}"
+                    f"⏳ 分析服务准备中：{public_error_detail(outcome.reason)}"
                     if getattr(outcome, "pending", False)
-                    else f"❌ 分析服务未就绪：{outcome.reason}"
+                    else f"❌ 分析服务未就绪：{public_error_detail(outcome.reason)}"
                 )
                 await event.send(event.plain_result(message))
                 note.append(
@@ -280,27 +340,15 @@ class StockRobotPlugin(Star):
             if report_id
             else None
         )
-        if markdown is None:
+        if markdown is None or not markdown.strip():
             logger.warning("报告定位或下载失败: kind=%s symbol=%s", kind, symbol)
-            await event.send(event.plain_result(fallback_image_message(self._web_url)))
+            await event.send(
+                event.plain_result(
+                    "❌ 分析已完成，但未能取回报告，请检查插件日志或稍后重试。"
+                )
+            )
             note.append(
-                "报告图片生成失败，兜底链接已发给用户。只回一句简短确认，不要再调用工具。"
+                "报告取回失败，原因已发给用户。只回一句简短确认，不要再调用工具。"
             )
             return
-
-        try:
-            url = await self.text_to_image(markdown)
-        except Exception:  # noqa: BLE001 — 渲染属于外部能力，失败降级为链接
-            logger.warning("报告转图失败", exc_info=True)
-            url = ""
-        if not url:
-            await event.send(event.plain_result(fallback_image_message(self._web_url)))
-            note.append(
-                "报告图片生成失败，兜底链接已发给用户。只回一句简短确认，不要再调用工具。"
-            )
-            return
-
-        await event.send(event.image_result(url))
-        note.append(
-            "报告图片已直接发给用户。只回一句简短确认（如“报告已发出”），不要复述报告内容，不要再调用工具。"
-        )
+        return markdown
