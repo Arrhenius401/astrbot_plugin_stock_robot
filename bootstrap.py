@@ -30,6 +30,8 @@ import httpx
 import yaml
 from astrbot.api import logger
 
+from .disk_support import RotatingLog
+
 DEFAULT_ARCHIVE_URL: str | None = None
 RELEASE_API_URL = (
     "https://api.github.com/repos/Arrhenius401/stock_robot/releases/latest"
@@ -64,7 +66,7 @@ class InstallProgress:
         logger.info("%s", safe)
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.log_path.open("a", encoding="utf-8") as output:
+            with RotatingLog(self.log_path) as output:
                 output.write(safe + "\n")
         except OSError as exc:
             logger.warning("安装进度日志写入失败：%s", type(exc).__name__)
@@ -371,7 +373,7 @@ async def run_command(
     async def consume() -> None:
         assert process.stdout is not None
         # 分块而非 readline，避免无换行安装输出超过 StreamReader 上限。
-        with log_path.open("a", encoding="utf-8") as output:
+        with RotatingLog(log_path) as output:
             pending = ""
             dropping = False
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -391,15 +393,24 @@ async def run_command(
                         else redact(line)
                     )
                     dropping = False
-                    output.write(safe + "\n")
-                    output.flush()
+                    try:
+                        output.write(safe + "\n")
+                    except OSError as error:
+                        logger.warning(
+                            "安装日志写入失败，继续排空输出: %s", type(error).__name__
+                        )
                     tail.append(safe)
                     if progress is not None:
                         progress.record(safe)
             pending += decoder.decode(b"", final=True)
             if pending or dropping:
                 safe = "[过长安装日志行已略去]" if dropping else redact(pending)
-                output.write(safe + "\n")
+                try:
+                    output.write(safe + "\n")
+                except OSError as error:
+                    logger.warning(
+                        "安装日志写入失败，继续排空输出: %s", type(error).__name__
+                    )
                 tail.append(safe)
                 if progress is not None:
                     progress.record(safe)

@@ -28,6 +28,7 @@ from .bootstrap import (
     venv_launcher,
     write_config,
 )
+from .disk_support import RotatingLog
 
 State = Literal["idle", "starting", "ready", "failed", "stopped"]
 
@@ -117,6 +118,19 @@ class ServiceLauncher:
     @property
     def state(self) -> State:
         return self._state
+
+    def owns_ready_service(self) -> bool:
+        """健康复用不能证明进程归属；只允许本实例持有的已校验进程。"""
+        return (
+            not self._stopped
+            and self._can_start
+            and self.auto_install
+            and self._state == "ready"
+            and self._process is not None
+            and self._process.returncode is None
+            and (self._task is None or self._task.done())
+            and instance_ready(self.instance, self.extras)
+        )
 
     def _get_or_create_task(
         self, allow_install: bool
@@ -366,7 +380,7 @@ class ServiceLauncher:
 
     async def _start(self) -> ReadyOutcome:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self._log = (self.data_dir / "service.log").open("a", encoding="utf-8")
+        self._log = RotatingLog(self.data_dir / "service.log")
         creation = asyncio.create_task(
             spawn_process(
                 str(venv_launcher(self.instance)),

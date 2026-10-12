@@ -33,6 +33,7 @@ from .font_support import ensure_chinese_font
 from .launcher import ServiceLauncher
 from .report_delivery import ReportDelivery
 from .report_renderer import ReportRenderer
+from .report_storage import ReportStorage
 
 
 async def read_llm_config(context: Context) -> dict | None:
@@ -96,8 +97,19 @@ class StockRobotPlugin(Star):
         base_url = str(self.config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
         self._base_url = base_url
         data_dir = Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_stock_robot"
+        self._storage = ReportStorage(data_dir)
         self._delivery = ReportDelivery(
-            data_dir / "delivery_tmp", ReportRenderer(self.text_to_image)
+            data_dir / "delivery_tmp",
+            ReportRenderer(self.text_to_image),
+            storage=self._storage,
+        )
+        self._cleanup_uncertain = False
+        self._storage.cleanup_raw = bool(config.get("cleanup_previous_reports", False))
+        self._storage.busy = lambda: self._delivery._reserved > 0
+        self._storage.can_clean_raw = lambda: (
+            not self._cleanup_uncertain
+            and self._launcher is not None
+            and self._launcher.owns_ready_service()
         )
         self._analysis_locks: dict[tuple[str, str], tuple[asyncio.Lock, int]] = {}
         self._analysis_tasks: set[asyncio.Task] = set()
@@ -146,6 +158,7 @@ class StockRobotPlugin(Star):
             llm_loader=partial(read_llm_config, self.context),
         )
         self._launcher.start_background()
+        await self._storage.start()
 
     async def terminate(self):
         """先回收任务和自建服务，HTTP 客户端始终关闭。"""
@@ -159,8 +172,11 @@ class StockRobotPlugin(Star):
                 )
                 await self._delivery.stop()
             finally:
-                if self._launcher is not None:
-                    await self._launcher.stop()
+                try:
+                    await self._storage.stop()
+                finally:
+                    if self._launcher is not None:
+                        await self._launcher.stop()
         finally:
             await self._client.aclose()
 
@@ -220,7 +236,9 @@ class StockRobotPlugin(Star):
         note: list[str],
     ) -> None:
         """分析／取报告使用工具截止时间；完整报告由受管理任务独立发送。"""
-        if self._stopping or not self._delivery.reserve():
+        if self._stopping or not await self._storage.before_task(
+            self._delivery.reserve
+        ):
             await event.send(
                 event.plain_result("⏳ 报告任务较多或插件正在停用，请稍后再试。")
             )
@@ -317,11 +335,17 @@ class StockRobotPlugin(Star):
             event.plain_result(progress_message(symbol, effective_timeout))
         )
 
-        if kind == "stock":
-            outcome = await self._client.analyze_stock(symbol, effective_timeout)
-        else:
-            outcome = await self._client.analyze_index(symbol, effective_timeout)
+        # 超时/取消或错误响应不能证明服务端分析停止；保持保守清理状态。
+        try:
+            if kind == "stock":
+                outcome = await self._client.analyze_stock(symbol, effective_timeout)
+            else:
+                outcome = await self._client.analyze_index(symbol, effective_timeout)
+        except BaseException:
+            self._cleanup_uncertain = True
+            raise
         if not outcome.ok:
+            self._cleanup_uncertain = True
             await event.send(event.plain_result(outcome.user_message))
             note.append(
                 "分析失败，原因已直接发给用户。只回一句简短确认，不要编造分析内容，不要再调用工具。"

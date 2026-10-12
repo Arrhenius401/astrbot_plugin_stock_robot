@@ -1,4 +1,8 @@
 {
+  "cleanup_previous_reports": {
+    "description": "清理历史原始报告", "type": "bool", "default": false,
+    "hint": "重载生效；仅清理插件持有且布局已验证的自建服务中超过 7 天的股票/指数报告；共享服务或任务状态不明时跳过"
+  },
   "base_url": {
     "description": "stock_robot 服务地址",
     "type": "string",
