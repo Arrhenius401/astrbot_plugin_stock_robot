@@ -356,3 +356,88 @@ def test_capacity_rejected_before_new_analysis(tmp_path):
     assert not service.reserve()
     service.release()
     assert service.reserve()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "image", "render", "file"])
+async def test_retention_integrated_with_delivery(tmp_path, failure):
+    import json
+
+    from stock_robot_plugin_test.report_storage import ReportStorage
+
+    storage = ReportStorage(tmp_path)
+    await storage.start()
+    event = Event(
+        image_error=OSError("image") if failure in {"image", "file"} else None,
+        file_error=OSError("file") if failure == "file" else None,
+    )
+    service = ReportDelivery(
+        storage.root,
+        Renderer(OSError("render") if failure == "render" else None),
+        storage=storage,
+    )
+    assert service.reserve()
+    service.submit(event, "# 中文\n完整原文\n", "000300", "index")
+    await asyncio.gather(*list(service._tasks))
+    directories = list(storage.root.iterdir())
+    assert len(directories) == 1
+    directory = directories[0]
+    assert artifact(directory).read_bytes() == "# 中文\n完整原文\n".encode()
+    assert artifact(directory, "png").exists() == (failure != "render")
+    meta = json.loads((directory / "task.json").read_text("utf-8"))
+    assert meta["state"] == ("success" if failure is None else "failed")
+    assert not storage.active and service._reserved == 0
+    await service.stop()
+    await storage.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_delivery_keeps_report_after_render_worker(tmp_path):
+    import json
+
+    from stock_robot_plugin_test.report_storage import ReportStorage
+
+    storage = ReportStorage(tmp_path)
+    await storage.start()
+    entered = asyncio.Event()
+
+    class BlockingRenderer:
+        async def render(self, markdown):
+            entered.set()
+            await asyncio.Future()
+
+    service = ReportDelivery(storage.root, BlockingRenderer(), storage=storage)
+    assert service.reserve()
+    service.submit(Event(), "cancelled report", "1", "stock")
+    await entered.wait()
+    await service.stop()
+    directory = next(storage.root.iterdir())
+    assert artifact(directory).read_text() == "cancelled report"
+    assert json.loads((directory / "task.json").read_text())["state"] == "cancelled"
+    assert not storage.active and service._reserved == 0
+    await storage.stop()
+
+
+@pytest.mark.asyncio
+async def test_retention_failure_does_not_change_successful_send(tmp_path, monkeypatch):
+    from stock_robot_plugin_test.report_storage import ReportStorage
+
+    storage = ReportStorage(tmp_path)
+    await storage.start()
+
+    def cannot_write(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(storage, "_write_json", cannot_write)
+    event = Event()
+    service = ReportDelivery(storage.root, Renderer(), storage=storage)
+    assert service.reserve()
+    service.submit(event, "report", "1", "stock")
+    await asyncio.gather(*list(service._tasks))
+    assert len(event.messages) == 1 and not event.files
+    assert service._reserved == 0 and not storage.active
+    await storage.stop()
+
+
+def artifact(directory, suffix="md"):
+    return next(directory.glob("*." + suffix), directory / ("report." + suffix))

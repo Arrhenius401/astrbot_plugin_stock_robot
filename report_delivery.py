@@ -18,6 +18,7 @@ from typing import Any
 from astrbot.api import logger
 
 from .report_renderer import RenderedReport, ReportRenderer
+from .report_storage import ReportStorage
 
 CHUNK_SIZE = 64 * 1024
 
@@ -76,10 +77,12 @@ class ReportDelivery:
         temp_root: Path,
         renderer: ReportRenderer,
         limits: DeliveryLimits | None = None,
+        storage: ReportStorage | None = None,
     ):
         self.temp_root = temp_root
         self.renderer = renderer
         self.limits = limits or DeliveryLimits()
+        self.storage = storage
         self._reserved = 0
         self._closing = False
         self._tasks: set[asyncio.Task] = set()
@@ -162,13 +165,48 @@ class ReportDelivery:
     async def _deliver(
         self, event: Any, markdown: str, symbol: str, kind: str, session: _Session
     ) -> None:
+        task_id = None
+        result = {"image": None, "state": "failed", "stage": "queued", "error": ""}
+        try:
+            if self.storage is not None:
+                task_id = uuid.uuid4().hex
+                task_id = await self.storage.io(
+                    self.storage.begin, markdown, symbol, kind, task_id
+                )
+            await self._deliver_content(event, markdown, symbol, kind, session, result)
+        except asyncio.CancelledError:
+            result.update(state="cancelled", error="CancelledError")
+            raise
+        finally:
+            if self.storage is not None:
+                await self.storage.io(
+                    self.storage.finish,
+                    task_id,
+                    result["image"],
+                    result["state"],
+                    result["stage"],
+                    result["error"],
+                )
+
+    async def _deliver_content(
+        self,
+        event: Any,
+        markdown: str,
+        symbol: str,
+        kind: str,
+        session: _Session,
+        result: dict,
+    ) -> None:
         async with session.lock:
             try:
+                result["stage"] = "render"
                 image = await asyncio.wait_for(
                     self._render(markdown),
                     timeout=self.limits.render_timeout,
                 )
+                result.update(image=image, stage="image")
                 await self._send_image(event, image)
+                result.update(state="success", stage="complete")
                 logger.info(
                     "报告长图已提交: symbol=%s size=%sx%s bytes=%s",
                     symbol,
@@ -178,6 +216,7 @@ class ReportDelivery:
                 )
                 return
             except Exception as error:  # noqa: BLE001 — 绘图／消息平台隔离，失败交付完整原文
+                result["error"] = type(error).__name__
                 logger.warning(
                     "报告长图不可用，改发 Markdown: symbol=%s reason=%s",
                     symbol,
@@ -185,10 +224,13 @@ class ReportDelivery:
                 )
             await self._notify(event, "报告图片未能发送，正在发送完整 Markdown 文件。")
             try:
+                result["stage"] = "file"
                 async with asyncio.timeout(self.limits.file_timeout):
                     await self._send_markdown(event, markdown, symbol, kind)
                 logger.info("报告文件已提交: symbol=%s", symbol)
+                result["stage"] = "complete-with-fallback"
             except Exception as error:  # noqa: BLE001 — 消息平台边界，不发送链接或拆分正文
+                result["error"] = type(error).__name__
                 logger.warning(
                     "报告文件发送失败: symbol=%s reason=%s",
                     symbol,

@@ -39,6 +39,34 @@ def make_launcher(tmp_path, **overrides):
     return launcher.ServiceLauncher(**options)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "condition",
+    ["owned", "external", "disabled", "shared", "exited", "installing", "bad-record"],
+)
+async def test_original_report_cleanup_requires_owned_ready_process(
+    tmp_path, monkeypatch, condition
+):
+    options = {}
+    if condition == "external":
+        options["base_url"] = "https://example.org"
+    if condition == "disabled":
+        options["auto_install"] = False
+    service = make_launcher(tmp_path, **options)
+    service._state = "ready"
+    service._process = types.SimpleNamespace(
+        returncode=0 if condition == "exited" else None
+    )
+    if condition == "shared":
+        service._process = None
+    monkeypatch.setattr(
+        launcher, "instance_ready", lambda *args: condition != "bad-record"
+    )
+    if condition == "installing":
+        service._task = asyncio.get_running_loop().create_future()
+    assert service.owns_ready_service() == (condition == "owned")
+
+
 class FakeProcess:
     def __init__(self, returncode=None):
         self.returncode = returncode
