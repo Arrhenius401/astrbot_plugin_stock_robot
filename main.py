@@ -2,7 +2,10 @@
 
 import asyncio
 import inspect
+import json
 import math
+import time
+from copy import copy
 from functools import partial
 from pathlib import Path
 
@@ -29,11 +32,17 @@ from .client import (
     public_error_detail,
     resolve_effective_timeout,
 )
+from .disk_support import FileLock
 from .font_support import ensure_chinese_font
 from .launcher import ServiceLauncher
+from .pending_queue import PendingQueue, canonical_symbol
 from .report_delivery import ReportDelivery
 from .report_renderer import ReportRenderer
 from .report_storage import ReportStorage
+from .waiting_messages import SessionEvent, generate_text, notification_loop
+
+# 每个插件版本只自动安装已完成兼容验收的主仓正式版，不追随 latest。
+MANAGED_RELEASE_TAG = "v0.2.0"
 
 
 async def read_llm_config(context: Context) -> dict | None:
@@ -127,6 +136,11 @@ class StockRobotPlugin(Star):
         if not math.isfinite(self._install_timeout) or self._install_timeout <= 0:
             raise ValueError("install_timeout_seconds 必须为大于 0 的有限秒数")
         self._client = StockRobotClient(base_url, self._timeout_seconds)
+        self._pending = PendingQueue(data_dir / "waiting.sqlite3")
+        self._waiting_lock = FileLock(data_dir / "waiting-worker.lock")
+        self._waiting_task: asyncio.Task | None = None
+        self._batch_tasks: dict[str, asyncio.Task] = {}
+        self._data_dir = data_dir
 
     async def initialize(self):
         """准备任务由 launcher 持有，插件加载立即返回。"""
@@ -156,13 +170,23 @@ class StockRobotPlugin(Star):
             package_index_url=str(self.config.get("package_index_url") or "").strip(),
             progress=progress,
             llm_loader=partial(read_llm_config, self.context),
+            managed_release_tag=MANAGED_RELEASE_TAG,
         )
         self._launcher.start_background()
         await self._storage.start()
+        self._waiting_task = asyncio.create_task(notification_loop(
+            self._pending, self.context,
+            lambda: self._launcher is not None and getattr(self._launcher, "state", "idle") == "ready",
+            logger, worker_lock=self._waiting_lock, recover=self._recover_batches,
+        ))
 
     async def terminate(self):
         """先回收任务和自建服务，HTTP 客户端始终关闭。"""
         self._stopping = True
+        if self._waiting_task is not None:
+            self._waiting_task.cancel()
+            await asyncio.gather(self._waiting_task, return_exceptions=True)
+        self._waiting_lock.close()
         try:
             try:
                 for task in list(self._analysis_tasks):
@@ -183,14 +207,189 @@ class StockRobotPlugin(Star):
     # ------------------------------------------------------------------
     # LLM 工具
 
-    @filter.llm_tool(name="analyze_stock")
-    async def analyze_stock(self, event: AstrMessageEvent, symbol: str):
-        """分析一只 A 股个股，并把完整研报以图片发送给用户。
+    @filter.on_llm_request()
+    async def waiting_confirmation_context(self, event: AstrMessageEvent, request):
+        """只在原会话等待确认期间给 AI 暴露确认工具和当前任务范围。"""
+        record = self._pending.get(event.unified_msg_origin)
+        waiting = (record is not None and record["state"] == "awaiting_confirmation"
+                   and time.time() < record["deadline"])
+        if not waiting:
+            if request.func_tool is not None:
+                request.func_tool = copy(request.func_tool)
+                request.func_tool.remove_tool("confirm_waiting_analysis")
+            return
+        request.system_prompt += (
+            "\n当前会话有服务恢复后的分析询问：" + json.dumps(record, ensure_ascii=False)
+            + "\n仅当本轮用户明确在回答该询问时调用 confirm_waiting_analysis；"
+            "群内任何用户均可确认。肯定则 confirm，拒绝则 cancel；"
+            "只确认部分时填写对应代码。含糊、暂缓或无关聊天不调用。"
+            "本轮用户提出新的分析需求时调用正常分析工具，由插件清空旧队列。"
+            "不要将普通的‘好’机械视为确认，不得自行替用户同意。"
+        )
 
-        当用户询问某只 A 股个股的分析、评价、是否值得关注或买入时使用。
+    @filter.llm_tool(name="confirm_waiting_analysis")
+    async def confirm_waiting_analysis(
+        self, event: AstrMessageEvent, batch_id: str, action: str, symbols: str = "",
+    ):
+        """处理用户对服务恢复询问的明确回答，不能用于新分析请求。
 
         Args:
-            symbol(string): 6 位股票代码，例如 600519
+            batch_id(string): 当前询问中给出的任务 ID，必须原样传入
+            action(string): confirm 表示明确同意，cancel 表示明确拒绝
+            symbols(string): 全部确认时留空；部分确认时填询问内的代码，以英文逗号分隔
+        """
+        umo = event.unified_msg_origin
+        record = self._pending.get(umo)
+        if record is None or record["id"] != batch_id:
+            return "等待任务已变化或已清除，请勿重新调用分析工具执行旧任务。"
+        if action == "cancel":
+            self._pending.discard(umo)
+            return "积压分析已取消。请自然地简短回应用户。"
+        if action != "confirm":
+            return "回答不明确，尚未执行任何分析。"
+        chosen = [x.strip() for x in symbols.split(",") if x.strip()] if symbols else None
+        try:
+            accepted = self._pending.confirm(umo, batch_id, symbols=chosen)
+        except ValueError:
+            return "所选标的不属于当前等待队列，请先澄清。"
+        if accepted is None:
+            return "等待已到期或任务已执行，请勿重新分析旧任务。"
+        self._start_batch(event, accepted)
+        return "已确认积压任务，插件会依次分析。只简短确认，勿重复调用分析工具。"
+
+    def _start_batch(self, event, record):
+        if record["id"] in self._batch_tasks or self._stopping:
+            return
+        task = asyncio.create_task(self._run_confirmed_batch(event, record))
+        self._batch_tasks[record["id"]] = task
+        self._analysis_tasks.add(task)
+        task.add_done_callback(self._analysis_tasks.discard)
+        task.add_done_callback(lambda _: self._batch_tasks.pop(record["id"], None))
+
+    def _recover_batches(self):
+        for record in self._pending.accepted():
+            self._start_batch(SessionEvent(self.context, record["umo"]), record)
+
+    async def _run_confirmed_batch(self, event, record):
+        lock = FileLock(self._data_dir / f"batch-{record['id']}.lock")
+        if not lock.acquire():
+            return
+        try:
+            # 取到独占锁后重读，防止其他 worker 已完成后恢复陈旧快照。
+            latest = next((item for item in self._pending.accepted() if item["id"] == record["id"]), None)
+            if latest is None:
+                return
+            record = latest
+            steps = record.setdefault("steps", [dict(item, state="waiting") for item in record["targets"]])
+            self._pending.save_accepted(record)
+            for step in steps:
+                if step["state"] in {"done", "failed"}:
+                    continue
+                if step["state"] == "analyzing":
+                    # API 没有幂等请求号，崩溃后不能证明分析是否已结束。
+                    step.update(state="failed", error="analysis_interrupted_unknown_result")
+                    self._pending.save_accepted(record)
+                    logger.warning("分析被中断且结果不明，未重复调用：%s", step["symbol"])
+                    try:
+                        async with asyncio.timeout(30):
+                            text = await generate_text(self.context, event.unified_msg_origin, {
+                                "event": "analysis_interrupted", "symbol": step["symbol"],
+                                "fact": "重载时分析被中断，无法确认结果；未自动重跑，如仍需要请重新提出",
+                            })
+                            await event.send(event.plain_result(text))
+                    except Exception as error:  # noqa: BLE001 — 无可用模型或平台时保留诊断
+                        logger.warning("分析中断提示未发出：%s", type(error).__name__)
+                    continue
+                if step["state"] == "report_ready":
+                    if not self._delivery.reserve():
+                        return
+                    try:
+                        await self._deliver_confirmed_report(event, step["markdown"],
+                                                             step["symbol"], step["kind"],
+                                                             record=record, step=step)
+                    finally:
+                        self._delivery.release()
+                else:
+                    if (self._launcher is not None
+                            and getattr(self._launcher, "state", "ready") != "ready"):
+                        return
+                    step["state"] = "analyzing"
+                    self._pending.save_accepted(record)
+                    await self._run_analysis(event, step["kind"], step["symbol"], [],
+                                             from_queue=True, record=record, step=step)
+                    if step["state"] == "waiting":
+                        return
+                    if step["state"] == "analyzing":
+                        step.update(state="failed", error="analysis_or_report_failed")
+                        self._pending.save_accepted(record)
+        except asyncio.CancelledError:
+            logger.info("积压分析被中断，保留已接受任务记录：%s", record["id"])
+            raise
+        except Exception as error:  # noqa: BLE001 — 后台任务隔离，保留记录供恢复
+            logger.warning("积压分析执行失败：%s", type(error).__name__)
+        else:
+            self._pending.finish(record["id"])
+        finally:
+            lock.close()
+
+    async def _deliver_confirmed_report(self, event, markdown, symbol, kind, *, record=None, step=None):
+        """只重试文案与投递，已经生成的研报不会再次分析。"""
+        task_id = await self._storage.io(self._storage.begin, markdown, symbol, kind)
+        saved = step if step is not None else {}
+        bridge = saved.get("bridge")
+        bridge_sent = saved.get("bridge_sent", False)
+        success = False
+        error_name = ""
+        try:
+            for attempt in range(saved.get("attempts", 0), 3):
+                try:
+                    delay = saved.get("retry_at", 0) - time.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    async with asyncio.timeout(30):
+                        if bridge is None:
+                            bridge = await generate_text(self.context, event.unified_msg_origin, {
+                                "event": "report_ready", "symbol": symbol,
+                                "fact": "用户已确认；报告已生成，即将发送，尚未送达",
+                            })
+                            saved["bridge"] = bridge
+                            if record is not None:
+                                self._pending.save_accepted(record)
+                        if not bridge_sent:
+                            await event.send(event.plain_result(bridge))
+                            bridge_sent = True
+                            saved["bridge_sent"] = True
+                            if record is not None:
+                                self._pending.save_accepted(record)
+                    success = await self._delivery.deliver_reserved(event, markdown, symbol, kind)
+                    if success:
+                        saved["state"] = "done"
+                        saved.pop("markdown", None)
+                        if record is not None:
+                            self._pending.save_accepted(record)
+                        return
+                except Exception as error:  # noqa: BLE001 — 模型和消息平台 SDK 隔离
+                    error_name = type(error).__name__
+                    logger.warning("积压报告投递尚未完成，第 %s 次：%s", attempt + 1, error_name)
+                saved.update(attempts=attempt + 1, retry_at=time.time() + 30)
+                if record is not None:
+                    self._pending.save_accepted(record)
+            saved["state"] = "failed"
+            saved["error"] = error_name or "delivery_failed"
+            if record is not None:
+                self._pending.save_accepted(record)
+        finally:
+            await self._storage.io(self._storage.finish, task_id, None,
+                                   "success" if success else "failed", "queued_delivery", error_name)
+
+    @filter.llm_tool(name="analyze_stock")
+    async def analyze_stock(self, event: AstrMessageEvent, symbol: str):
+        """分析一只 A 股或港股个股，并把完整研报以图片发送给用户。
+
+        当用户询问某只 A 股或港股个股的分析、评价、是否值得关注或买入时使用。
+
+        Args:
+            symbol(string): A 股 6 位代码或港股 5 位代码，例如 600519、00700.HK
         """
         note: list[str] = []
         await self._run_analysis(event, "stock", symbol, note)
@@ -234,11 +433,33 @@ class StockRobotPlugin(Star):
         kind: ReportKind,
         symbol: str,
         note: list[str],
+        *,
+        from_queue: bool = False,
+        record=None,
+        step=None,
     ) -> None:
         """分析／取报告使用工具截止时间；完整报告由受管理任务独立发送。"""
+        symbol = canonical_symbol(kind, symbol)
+        if not from_queue:
+            umo = event.unified_msg_origin
+            existing = self._pending.get(umo)
+            ready = (self._launcher is None
+                     or getattr(self._launcher, "state", "ready") == "ready")
+            if existing is not None and (existing["state"] == "awaiting_confirmation" or ready):
+                self._pending.discard(umo)
+            if (self._launcher is not None
+                    and getattr(self._launcher, "state", "ready") in {"idle", "starting"}):
+                evicted = self._pending.enqueue(umo, kind, symbol)
+                detail = f"；已替换最早的 {evicted['symbol']}" if evicted else ""
+                note.append("服务暂不可用，已加入本会话的等待队列" + detail
+                            + "。恢复后会统一询问是否仍需分析，尚未开始分析。请自然告知用户。")
+                return
         if self._stopping or not await self._storage.before_task(
             self._delivery.reserve
         ):
+            if step is not None:
+                step["state"] = "waiting"
+                self._pending.save_accepted(record)
             await event.send(
                 event.plain_result("⏳ 报告任务较多或插件正在停用，请稍后再试。")
             )
@@ -251,7 +472,7 @@ class StockRobotPlugin(Star):
         lock, users = self._analysis_locks.get(key, (asyncio.Lock(), 0))
         self._analysis_locks[key] = (lock, users + 1)
         task = asyncio.current_task()
-        if task is not None:
+        if task is not None and not from_queue:
             self._analysis_tasks.add(task)
         try:
             async with asyncio.timeout(max(0, effective_timeout - 5)):
@@ -261,6 +482,13 @@ class StockRobotPlugin(Star):
                         event, kind, symbol, note, deadline
                     )
             if markdown is not None:
+                if from_queue:
+                    if step is not None:
+                        step.update(state="report_ready", markdown=markdown)
+                        self._pending.save_accepted(record)
+                    await self._deliver_confirmed_report(event, markdown, symbol, kind,
+                                                         record=record, step=step)
+                    return
                 self._delivery.submit(event, markdown, symbol, kind)
                 submitted = True
                 note.append(
@@ -282,7 +510,7 @@ class StockRobotPlugin(Star):
         finally:
             if not submitted:
                 self._delivery.release()
-            if task is not None:
+            if task is not None and not from_queue:
                 self._analysis_tasks.discard(task)
             _, users = self._analysis_locks[key]
             if users == 1:

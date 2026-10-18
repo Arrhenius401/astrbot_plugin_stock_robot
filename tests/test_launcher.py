@@ -40,6 +40,77 @@ def make_launcher(tmp_path, **overrides):
 
 
 @pytest.mark.asyncio
+async def test_cancelling_unowned_probe_never_rolls_back_another_instance(tmp_path, monkeypatch):
+    instance = tmp_path / "instance"
+    candidate = instance / ".releases/release-other"
+    candidate.mkdir(parents=True)
+    pointer = instance / "active-runtime.json"
+    body = json.dumps({"active": ".releases/release-other", "previous": ".", "pending_health": True})
+    pointer.write_text(body)
+    probing = asyncio.Event()
+
+    async def health(*args):
+        probing.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(launcher, "probe_health", health)
+    service = make_launcher(tmp_path)
+    task = asyncio.create_task(service._prepare(True))
+    await probing.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pointer.read_text() == body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_pending", [False, True])
+async def test_failed_candidate_start_rolls_back_and_starts_previous(tmp_path, monkeypatch, already_pending):
+    instance = tmp_path / "instance"
+    instance.mkdir()
+    candidate = instance / ".releases/release-candidate"
+    candidate.mkdir(parents=True)
+    if already_pending:
+        (instance / "active-runtime.json").write_text(json.dumps({
+            "active": ".releases/release-candidate", "previous": ".", "pending_health": True,
+        }))
+    service = make_launcher(tmp_path, managed_release_tag="v0.2.0")
+    started = []
+
+    async def unhealthy(*args):
+        return False
+
+    async def install(*args, **kwargs):
+        assert not already_pending
+        (instance / "active-runtime.json").write_text(json.dumps({
+            "active": ".releases/release-candidate", "previous": ".", "pending_health": True,
+        }))
+        return launcher.StepResult(True)
+
+    async def configured(*args):
+        return launcher.StepResult(True)
+
+    async def start():
+        current = launcher.runtime_path(instance)
+        started.append(current)
+        return launcher.ReadyOutcome(current == instance, "bad candidate" if current != instance else "")
+
+    monkeypatch.setattr(launcher, "probe_health", unhealthy)
+    monkeypatch.setattr(launcher, "instance_ready", lambda *_: True)
+    monkeypatch.setattr(launcher, "source_matches_release", lambda *_: already_pending)
+    monkeypatch.setattr(launcher, "ensure_instance", install)
+    monkeypatch.setattr(service, "_configure", configured)
+    monkeypatch.setattr(service, "_start", start)
+    try:
+        result = await service._prepare(True)
+        assert result.ok
+        assert started == [candidate, instance]
+        assert launcher.runtime_path(instance) == instance
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "condition",
     ["owned", "external", "disabled", "shared", "exited", "installing", "bad-record"],
@@ -65,6 +136,31 @@ async def test_original_report_cleanup_requires_owned_ready_process(
     if condition == "installing":
         service._task = asyncio.get_running_loop().create_future()
     assert service.owns_ready_service() == (condition == "owned")
+
+
+@pytest.mark.asyncio
+async def test_managed_release_upgrade_passes_pinned_tag_to_bootstrap(tmp_path, monkeypatch):
+    service = make_launcher(
+        tmp_path,
+        managed_release_tag="v0.2.0",
+    )
+    monkeypatch.setattr(launcher, "probe_health", lambda *_: asyncio.sleep(0, False))
+    monkeypatch.setattr(launcher, "instance_ready", lambda *_: True)
+    monkeypatch.setattr(launcher, "source_matches_release", lambda *_: False)
+    monkeypatch.setattr(service, "_configure", lambda *_: asyncio.sleep(0, launcher.StepResult(True)))
+    monkeypatch.setattr(service, "_start", lambda: asyncio.sleep(0, launcher.ReadyOutcome(True)))
+    seen = {}
+
+    async def ensure(*args, **kwargs):
+        seen["release_tag"] = kwargs["expected_release_tag"]
+        return launcher.StepResult(True)
+
+    monkeypatch.setattr(launcher, "ensure_instance", ensure)
+
+    result = await service._prepare(allow_install=True)
+
+    assert result.ok
+    assert seen == {"release_tag": "v0.2.0"}
 
 
 class FakeProcess:

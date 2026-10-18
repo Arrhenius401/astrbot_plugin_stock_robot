@@ -20,15 +20,21 @@ from .bootstrap import (
     InstallProgress,
     Runner,
     StepResult,
+    confirm_runtime,
     ensure_instance,
     instance_ready,
+    prune_runtimes,
     reap_process,
     redact,
+    rollback_runtime,
+    runtime_path,
+    runtime_pending,
+    source_matches_release,
     spawn_process,
     venv_launcher,
     write_config,
 )
-from .disk_support import RotatingLog
+from .disk_support import FileLock, RotatingLog
 
 State = Literal["idle", "starting", "ready", "failed", "stopped"]
 
@@ -66,6 +72,7 @@ class ServiceLauncher:
         install_timeout: float = INSTALL_TIMEOUT_SECONDS,
         package_index_url: str = "",
         progress: InstallProgress | None = None,
+        managed_release_tag: str | None = None,
     ):
         parsed = urlsplit(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -101,6 +108,7 @@ class ServiceLauncher:
         self.install_timeout = install_timeout
         self.package_index_url = package_index_url
         self.progress = progress or InstallProgress(data_dir / "service.log")
+        self.managed_release_tag = managed_release_tag
         self.data_dir = data_dir
         self.instance = data_dir / "instance"
         self._llm = llm
@@ -114,6 +122,7 @@ class ServiceLauncher:
         self._state: State = "idle"
         self._reason = ""
         self._stop_lock = asyncio.Lock()
+        self._service_lock = FileLock(data_dir / "managed-service.lock")
 
     @property
     def state(self) -> State:
@@ -228,7 +237,9 @@ class ServiceLauncher:
 
     async def _prepare(self, allow_install: bool) -> ReadyOutcome:
         heartbeat: asyncio.Task[None] | None = None
+        original_runtime = self.instance
         try:
+            original_runtime = runtime_path(self.instance)
             if self._stopped:
                 return ReadyOutcome(False, "插件已停用")
             if await probe_health(self.base_url):
@@ -239,13 +250,22 @@ class ServiceLauncher:
                 return self._failure(
                     "分析服务未启动，此地址或配置仅允许复用正在运行的服务"
                 )
+            if self._service_lock.file is None and not self._service_lock.acquire():
+                return self._failure("另一插件实例正在准备或运行此服务，请等待其退出")
+            original_runtime = runtime_path(self.instance)
             if self._process is not None:
                 if self._process.returncode is None:
                     return self._failure("自建进程仍运行，健康探测失败，请查看插件日志")
                 await self._cleanup_process()
             self._state = "starting"
             heartbeat = asyncio.create_task(self._report_progress())
-            if not instance_ready(self.instance, self.extras):
+            managed_release = self.managed_release_tag is not None and self.archive_url is None
+            needs_upgrade = (
+                managed_release
+                and instance_ready(self.instance, self.extras)
+                and not source_matches_release(self.instance, self.managed_release_tag)
+            )
+            if not instance_ready(self.instance, self.extras) or needs_upgrade:
                 if not allow_install:
                     return self._failure(
                         self._reason or "安装尚未完成，请重载插件后查看安装日志"
@@ -260,21 +280,45 @@ class ServiceLauncher:
                     install_timeout=self.install_timeout,
                     package_index_url=self.package_index_url,
                     progress=self.progress,
+                    expected_release_tag=(self.managed_release_tag if managed_release else None),
                 )
                 if not result.ok:
-                    return self._failure(result.detail)
+                    if not needs_upgrade:
+                        return self._failure(result.detail)
+                    logger.warning("升级准备失败，将继续使用旧版本：%s", result.detail)
             self.progress.enter(4, "检查程序与配置")
             result = await self._configure(allow_install)
             if not result.ok:
+                if runtime_pending(self.instance):
+                    rollback_runtime(self.instance)
                 return self._failure(result.detail)
             if self._stopped:
                 return ReadyOutcome(False, "插件已停用")
             self.progress.enter(5, "启动服务")
             outcome = await self._start()
+            if not outcome.ok and (runtime_path(self.instance) != original_runtime
+                                   or runtime_pending(self.instance)):
+                rollback_runtime(self.instance)
+                logger.warning("新版本健康检查失败，已恢复旧版本并重新启动")
+                outcome = await self._start()
             if outcome.ok:
+                confirm_runtime(self.instance)
+                prune_runtimes(self.instance)
                 self.progress.emit("分析服务已就绪；" + self.progress.describe())
             return outcome
+        except asyncio.CancelledError:
+            if self._service_lock.file is not None and (
+                runtime_path(self.instance) != original_runtime or runtime_pending(self.instance)
+            ):
+                rollback_runtime(self.instance)
+                logger.info("升级被中断，已恢复旧版本指针")
+            raise
         except Exception as exc:  # noqa: BLE001 — 服务准备隔离边界，后台失败转为可见诊断
+            if self._service_lock.file is not None and runtime_pending(self.instance):
+                await self._cleanup_process()
+                rollback_runtime(self.instance)
+                logger.warning("候选启动异常，正在重新启动旧版：%s", type(exc).__name__)
+                return await self._start()
             return self._failure(
                 f"服务准备失败：{type(exc).__name__}：{redact(str(exc))}"
             )
@@ -442,3 +486,4 @@ class ServiceLauncher:
                 except asyncio.CancelledError:
                     logger.debug("已取消服务准备任务")
             await self._cleanup_process()
+            self._service_lock.close()

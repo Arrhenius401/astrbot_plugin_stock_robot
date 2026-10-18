@@ -39,6 +39,19 @@ def completed(store, state="success", markdown="完整中文\n报告\n", image=T
     return store.root / task
 
 
+def test_queued_delivery_removes_report_and_diagnostic_after_72_hours(store):
+    task = store.begin("等待报告", "00700.HK", "stock")
+    store.finish(task, None, "failed", "queued_delivery", "TimeoutError")
+    directory = store.root / task
+    diagnostic = store.diagnostics / f"{task}.json"
+    store.now[0] += 72 * 3600 - 1
+    store.clean()
+    assert directory.exists() and diagnostic.exists()
+    store.now[0] += 1
+    store.clean()
+    assert not directory.exists() and not diagnostic.exists()
+
+
 @pytest.mark.parametrize(
     "state,hours", [("success", 24), ("failed", 72), ("cancelled", 72)]
 )
