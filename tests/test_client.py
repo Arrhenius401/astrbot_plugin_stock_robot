@@ -399,11 +399,26 @@ def test_initialize_does_not_wait_for_provider(
                 assert (
                     Path(plugin_main.get_astrbot_data_path()) / "font.ttf"
                 ).is_file()
-            assert plugin._delivery.renderer.native_render == plugin.text_to_image
+            assert plugin._delivery.renderer.native_render == plugin_main._render_report
         finally:
             await plugin.terminate()
 
     run(scenario())
+
+
+def test_render_report_uses_local_t2i(plugin_main, monkeypatch):
+    calls = []
+
+    class Renderer:
+        async def render_t2i(self, text, *, use_network=True, return_url=True, template_name=None):
+            calls.append((text, use_network, return_url, template_name))
+            return "/tmp/report.jpg"
+
+    monkeypatch.setattr(
+        sys.modules["astrbot.core"], "html_renderer", Renderer(), raising=False
+    )
+    assert run(plugin_main._render_report("报告")) == "/tmp/report.jpg"
+    assert calls == [("报告", False, False, None)]
 
 
 def run(coro):
