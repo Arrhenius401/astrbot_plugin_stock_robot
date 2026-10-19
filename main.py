@@ -45,6 +45,18 @@ from .waiting_messages import SessionEvent, generate_text, notification_loop
 MANAGED_RELEASE_TAG = "v0.2.1"
 
 
+async def _render_report(markdown: str) -> str:
+    """使用 AstrBot 本地 Markdown 渲染，避免远程 T2I 对长报告返回非图片。"""
+    from astrbot.core import html_renderer
+
+    return await html_renderer.render_t2i(
+        markdown,
+        use_network=False,
+        return_url=False,
+        template_name=None,
+    )
+
+
 async def read_llm_config(context: Context) -> dict | None:
     """只在首次配置时复制默认模型，不随聊天会话同步。"""
     try:
@@ -109,7 +121,7 @@ class StockRobotPlugin(Star):
         self._storage = ReportStorage(data_dir)
         self._delivery = ReportDelivery(
             data_dir / "delivery_tmp",
-            ReportRenderer(self.text_to_image),
+            ReportRenderer(_render_report),
             storage=self._storage,
         )
         self._cleanup_uncertain = False
