@@ -42,7 +42,7 @@ from .report_storage import ReportStorage
 from .waiting_messages import SessionEvent, generate_text, notification_loop
 
 # 每个插件版本只自动安装已完成兼容验收的主仓正式版，不追随 latest。
-MANAGED_RELEASE_TAG = "v0.2.0"
+MANAGED_RELEASE_TAG = "v0.2.1"
 
 
 async def read_llm_config(context: Context) -> dict | None:
