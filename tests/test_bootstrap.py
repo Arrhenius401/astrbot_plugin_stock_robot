@@ -229,7 +229,7 @@ async def test_custom_index_and_install_stages(tmp_path, monkeypatch, uv):
     installs = [cmd for cmd, _ in commands if "install" in cmd]
     assert len(installs) == 2
     assert all(
-        cmd[cmd.index("--index-url") + 1] == "https://example.org/simple"
+        cmd[cmd.index("--default-index" if uv else "--index-url") + 1] == "https://example.org/simple"
         for cmd in installs
     )
     assert all(stage == 3 for cmd, stage in commands if "install" in cmd)
@@ -266,6 +266,157 @@ async def test_install_timeout_keeps_artifacts_and_reports_stage(tmp_path, monke
     assert "scipy" in result.detail and "secret" not in result.detail
     assert (tmp_path / "src").exists()
     assert not (tmp_path / "install-state.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uv", [None, "uv"])
+@pytest.mark.parametrize("custom,first,second", [
+    ("", "https://pypi.tuna.tsinghua.edu.cn/simple", None),
+    ("https://example.org/simple", "https://example.org/simple", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+])
+async def test_install_source_falls_back_once_and_stays_on_fallback(tmp_path, monkeypatch, custom, first, second, uv):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/requirements-core.lock.txt").touch()
+    bootstrap.venv_python(tmp_path).parent.mkdir(parents=True)
+    bootstrap.venv_python(tmp_path).touch()
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _: uv)
+    installs = []
+
+    async def runner(cmd, cwd):
+        if "install" in cmd:
+            installs.append(cmd)
+            if len(installs) == 1:
+                return 1, "Failed to fetch: connection refused"
+        return 0, ""
+
+    assert (await bootstrap.make_env(tmp_path, "", runner=runner, package_index_url=custom)).ok
+    assert len(installs) == 3
+    def source(cmd):
+        flag = "--default-index" if uv else "--index-url"
+        return cmd[cmd.index(flag) + 1] if flag in cmd else None
+    assert [source(cmd) for cmd in installs] == [first, second, second]
+    if uv:
+        assert ["--no-config" in cmd for cmd in installs] == [True, bool(second), bool(second)]
+    assert "--require-hashes" in installs[1] and "--no-deps" in installs[2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["HASH MISMATCH: failed to download", "Permission denied",
+                                   "No space left on device", "requires-python >=3.15",
+                                   "Failed building wheel", "unknown installation error",
+                                   "Ignored versions that require a different Python version; No matching distribution found",
+                                   "not a supported wheel on this platform", "No matching distribution found",
+                                   "Failed to download package: There is not enough space on the disk.",
+                                   "Failed to download package: certificate verify failed"])
+async def test_install_non_source_failure_never_changes_source(tmp_path, monkeypatch, reason):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/requirements-core.lock.txt").touch()
+    bootstrap.venv_python(tmp_path).parent.mkdir(parents=True)
+    bootstrap.venv_python(tmp_path).touch()
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _: "uv")
+    calls = []
+
+    async def runner(cmd, cwd):
+        calls.append(cmd)
+        return 1, reason
+
+    assert not (await bootstrap.make_env(tmp_path, "", runner=runner)).ok
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_tsinghua_is_not_retried_against_itself(tmp_path, monkeypatch):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/requirements-core.lock.txt").touch()
+    bootstrap.venv_python(tmp_path).parent.mkdir(parents=True)
+    bootstrap.venv_python(tmp_path).touch()
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _: "uv")
+    calls = []
+
+    async def runner(cmd, cwd):
+        calls.append(cmd)
+        return 1, "Connection refused"
+
+    assert not (await bootstrap.make_env(tmp_path, "", runner=runner,
+                                       package_index_url="https://pypi.tuna.tsinghua.edu.cn/simple/")).ok
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_both_sources_share_total_deadline_and_cancel_fallback(tmp_path, monkeypatch):
+    cancelled = []
+    installs = []
+
+    async def download(*args, **kwargs):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src/requirements-core.lock.txt").touch()
+        bootstrap.venv_python(tmp_path).parent.mkdir(parents=True)
+        bootstrap.venv_python(tmp_path).touch()
+        return bootstrap.StepResult(True)
+
+    async def runner(cmd, cwd):
+        installs.append(cmd)
+        if len(installs) == 1:
+            return 1, "Connection refused"
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+
+    monkeypatch.setattr(bootstrap, "download_source", download)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _: "uv")
+    result = await bootstrap.ensure_instance(tmp_path, None, "", runner=runner,
+                                           package_index_url="https://example.org/simple", install_timeout=0.05)
+    assert not result.ok and "后台安装超时" in result.detail
+    assert len(installs) == 2 and cancelled == [True]
+    assert not (tmp_path / "install-state.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_fallback_failure_stops_after_two_attempts_and_redacts_log(tmp_path, monkeypatch, caplog):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/requirements-core.lock.txt").touch()
+    bootstrap.venv_python(tmp_path).parent.mkdir(parents=True)
+    bootstrap.venv_python(tmp_path).touch()
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _: "uv")
+    commands = []
+
+    async def runner(cmd, cwd):
+        commands.append(cmd)
+        return 1, "Connection refused"
+
+    result = await bootstrap.make_env(tmp_path, "", runner=runner,
+                                     package_index_url="https://user:secret@example.org/simple?token=secret")
+    assert not result.ok and len(commands) == 2
+    assert "切换至" in caplog.text and "secret" not in caplog.text
+
+
+def test_explicit_index_environment_is_process_local_and_fallback_inherits(monkeypatch):
+    monkeypatch.setenv("UV_INDEX", "https://extra.example/simple")
+    monkeypatch.setenv("UV_CONFIG_FILE", "original-uv.toml")
+    monkeypatch.setenv("PIP_EXTRA_INDEX_URL", "https://extra.example/simple")
+    monkeypatch.setenv("PIP_CONFIG_FILE", "original.conf")
+    isolated = bootstrap._command_environment(["uv", "pip", "install", "--default-index", "https://chosen.example/simple"])
+    assert isolated is not None
+    assert "UV_INDEX" not in isolated and "PIP_EXTRA_INDEX_URL" not in isolated and "UV_CONFIG_FILE" not in isolated
+    assert isolated["PIP_CONFIG_FILE"] == bootstrap.os.devnull
+    assert bootstrap.os.environ["PIP_CONFIG_FILE"] == "original.conf"
+    assert bootstrap.os.environ["UV_INDEX"] == "https://extra.example/simple"
+    assert bootstrap.os.environ["UV_CONFIG_FILE"] == "original-uv.toml"
+    assert bootstrap._command_environment(["uv", "pip", "install", "-r", "requirements.txt"]) is None
+
+
+@pytest.mark.asyncio
+async def test_real_install_child_env_isolated_then_original_settings_restored(tmp_path, monkeypatch):
+    monkeypatch.setenv("UV_INDEX", "https://original.example/simple")
+    monkeypatch.setenv("PIP_CONFIG_FILE", "original.conf")
+    command = [sys.executable, "-c", "import os,json; print(json.dumps([os.getenv('UV_INDEX'),os.getenv('PIP_CONFIG_FILE')]))", "install"]
+    code, output = await bootstrap.run_command(command + ["--index-url", "https://chosen.example/simple"],
+                                              tmp_path, log_path=tmp_path / "child.log", timeout=10)
+    assert code == 0 and json.loads(output) == [None, bootstrap.os.devnull]
+    code, output = await bootstrap.run_command(command, tmp_path, log_path=tmp_path / "child.log", timeout=10)
+    assert code == 0 and json.loads(output) == ["https://original.example/simple", "original.conf"]
+    assert bootstrap.os.environ["UV_INDEX"] == "https://original.example/simple"
 
 
 def test_progress_heartbeat_without_output_and_redaction(tmp_path, caplog):

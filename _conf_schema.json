@@ -1,42 +1,39 @@
 {
   "cleanup_previous_reports": {
-    "description": "清理历史原始报告", "type": "bool", "default": false,
-    "hint": "重载生效；仅清理插件持有且布局已验证的自建服务中超过 7 天的股票/指数报告；共享服务或任务状态不明时跳过"
+    "description": "清理历史原始报告", "type": "bool", "default": true,
+    "hint": "节省磁盘空间。仅清理插件自建分析服务中超过 7 天的原始研报，删除后无法恢复；服务归属不明或正在处理任务时跳过。修改后重载插件生效。"
   },
-  "base_url": {
-    "description": "stock_robot 服务地址",
-    "type": "string",
-    "default": "http://127.0.0.1:25618",
-    "hint": "回环 HTTP 地址可自动准备服务；其他地址仅复用；修改后需重载插件"
+  "service_port": {
+    "description": "本机分析服务端口",
+    "type": "int",
+    "default": 25618,
+    "hint": "通常无需修改。端口被其他程序占用时可更换，范围为 1～65535；分析服务仅在本机运行。修改后重载插件生效。"
   },
   "timeout_seconds": {
-    "description": "分析 HTTP 超时上限（秒）",
+    "description": "单次分析最长等待时间（秒）",
     "type": "int",
     "default": 100,
-    "hint": "运行时与 AstrBot 的 provider_settings.tool_call_timeout 自动收敛取较小值"
+    "hint": "等待分析服务返回结果的最长时间。实际等待还受机器人平台的工具时限限制，调大此值不一定能延长等待。修改后重载插件生效。"
   },
   "startup_timeout_seconds": {
-    "description": "等待服务启动上限（秒）", "type": "int", "default": 60,
-    "hint": "安装在后台继续；本次等待还受 AstrBot 工具剩余时间限制"
-  },
-  "auto_install": {
-    "description": "自动准备本机服务", "type": "bool", "default": true,
-    "hint": "关闭后只复用已运行服务，不安装也不启动已有实例"
+    "description": "服务就绪最长等待时间（秒）", "type": "int", "default": 60,
+    "hint": "分析服务尚未就绪时，本次请求最多等待多久。等待结束后，后台安装仍会继续；实际等待还受机器人平台时限限制。修改后重载插件生效。"
   },
   "install_timeout_seconds": {
-    "description": "后台安装总时限（秒）", "type": "int", "default": 2400,
-    "hint": "默认 40 分钟，包含源码下载与环境安装；慢网络可增大；与聊天等待和服务启动时限分别控制，修改后重载"
+    "description": "后台安装最长用时（秒）", "type": "int", "default": 1800,
+    "hint": "默认 30 分钟，包括下载程序、安装依赖和换源重试。超时后停止本次安装，保留可复用缓存；网络慢时可适当调大。修改后重载插件生效。"
   },
   "package_index_url": {
-    "description": "Python 依赖包源（可选）", "type": "string", "default": "",
-    "hint": "填写 HTTP/HTTPS simple 包源地址，同时用于 uv 和 pip；留空沿用安装工具现有设置；安装失败后修改并重载可复用源码和缓存"
+    "description": "Python 安装包下载源（选填）", "type": "string", "default": "",
+    "hint": "通常无需填写，不影响股票数据来源。留空先用清华源，失败后尝试安装工具原有设置；填写后先用该源，失败再尝试清华源一次，同源不重复。地址示例：https://pypi.tuna.tsinghua.edu.cn/simple 。修改后重载插件生效；已安装成功的服务不会因此重装。"
+  },
+  "base_url": {
+    "description": "旧地址迁移信息", "type": "string", "default": "", "invisible": true
   },
   "bootstrap_extras": {
-    "description": "可选依赖", "type": "string", "default": "",
-    "hint": "留空安装核心依赖；rag 另装检索依赖；修改后重载会补装，改回核心不自动卸载旧 RAG 包"
+    "description": "旧依赖迁移信息", "type": "string", "default": "", "invisible": true
   },
   "source_archive_url": {
-    "description": "自定义源码归档（可选）", "type": "string", "default": "",
-    "hint": "留空安装本插件绑定并验证的正式版，插件重载时自动升级默认自建实例；填写则使用自定义固定归档且跳过自动升级，须包含锁清单"
+    "description": "旧来源迁移信息", "type": "string", "default": "", "invisible": true
   }
 }

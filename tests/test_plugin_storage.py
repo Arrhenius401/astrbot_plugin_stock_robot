@@ -83,7 +83,7 @@ class Event:
 async def test_plugin_entry_creates_retained_report_and_stops_cleanly(plugin_module):
     plugin = plugin_module.StockRobotPlugin(SimpleNamespace(), {})
     await plugin.initialize()
-    assert plugin._storage.enabled and not plugin._storage.cleanup_raw
+    assert plugin._storage.enabled and plugin._storage.cleanup_raw
 
     class Client:
         closed = False
