@@ -421,6 +421,27 @@ def test_render_report_uses_local_t2i(plugin_main, monkeypatch):
     assert calls == [("报告", False, False, None)]
 
 
+def test_report_renderer_calls_real_local_wrapper_with_path_output(plugin_main, monkeypatch, tmp_path):
+    """贯通公共渲染器与真实包装函数，不能分别用兼容桩掩盖签名错误。"""
+    from PIL import Image
+
+    image_path = tmp_path / "local-t2i.png"
+    calls = []
+
+    class Renderer:
+        async def render_t2i(self, text, *, use_network=True, return_url=True, template_name=None):
+            calls.append((text, use_network, return_url, template_name))
+            Image.new("RGB", (80, 120), "white").save(image_path)
+            return str(image_path)
+
+    monkeypatch.setattr(sys.modules["astrbot.core"], "html_renderer", Renderer(), raising=False)
+    rendered = run(plugin_main.ReportRenderer(plugin_main._render_report).render("# 完整研报\n\n正文"))
+    assert (rendered.width, rendered.height) == (80, 120)
+    assert rendered.png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert calls == [("# 完整研报\n\n正文", False, False, None)]
+    assert not image_path.exists()
+
+
 def run(coro):
     """在独立事件循环中执行协程（不引入 pytest-asyncio 依赖）。"""
     return asyncio.run(coro)
