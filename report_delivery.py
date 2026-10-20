@@ -102,6 +102,21 @@ class ReportDelivery:
     def release(self) -> None:
         self._reserved -= 1
 
+    async def deliver_reserved(self, event: Any, markdown: str, symbol: str, kind: str) -> bool:
+        """已确认积压任务等待真实交付结果，调用方负责释放预留名额。"""
+        if self._closing:
+            return False
+        key = str(event.unified_msg_origin)
+        session = self._sessions.setdefault(key, _Session(asyncio.Lock()))
+        session.users += 1
+        try:
+            result = await self._deliver(event, markdown, symbol, kind, session, queue_origin=True)
+            return result["stage"] in {"complete", "complete-with-fallback"}
+        finally:
+            session.users -= 1
+            if session.users == 0:
+                self._sessions.pop(key, None)
+
     def submit(self, event: Any, markdown: str, symbol: str, kind: str) -> None:
         """接管调用方已预留的名额，任务完成或取消时归还。"""
         if self._closing:
@@ -163,8 +178,9 @@ class ReportDelivery:
             logger.warning("报告提示发送失败: %s", type(error).__name__)
 
     async def _deliver(
-        self, event: Any, markdown: str, symbol: str, kind: str, session: _Session
-    ) -> None:
+        self, event: Any, markdown: str, symbol: str, kind: str, session: _Session,
+        *, queue_origin: bool = False,
+    ) -> dict:
         task_id = None
         result = {"image": None, "state": "failed", "stage": "queued", "error": ""}
         try:
@@ -184,9 +200,10 @@ class ReportDelivery:
                     task_id,
                     result["image"],
                     result["state"],
-                    result["stage"],
+                    "queued_delivery" if queue_origin else result["stage"],
                     result["error"],
                 )
+        return result
 
     async def _deliver_content(
         self,

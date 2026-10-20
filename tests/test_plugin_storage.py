@@ -15,7 +15,8 @@ def plugin_module(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "AstrBotConfig", dict, raising=False)
     event = ModuleType("astrbot.api.event")
     event.AstrMessageEvent = object
-    event.filter = SimpleNamespace(llm_tool=lambda **kwargs: lambda function: function)
+    event.filter = SimpleNamespace(llm_tool=lambda **kwargs: lambda function: function,
+                                   on_llm_request=lambda: lambda function: function)
     star = ModuleType("astrbot.api.star")
 
     class Star:

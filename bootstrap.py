@@ -30,7 +30,7 @@ import httpx
 import yaml
 from astrbot.api import logger
 
-from .disk_support import RotatingLog
+from .disk_support import RotatingLog, safe_path
 
 DEFAULT_ARCHIVE_URL: str | None = None
 RELEASE_API_URL = (
@@ -119,9 +119,95 @@ def redact(text: str) -> str:
     return re.sub(r"\bsk-[A-Za-z0-9_-]+", "[密钥已隐藏]", text)
 
 
+def runtime_path(instance: Path) -> Path:
+    """解释活动版本指针；旧版根目录布局继续可用。"""
+    pointer = instance / "active-runtime.json"
+    if not pointer.exists():
+        return instance
+    if not safe_path(pointer):
+        raise ValueError("活动版本指针路径不安全")
+    state = json.loads(pointer.read_text("utf-8"))
+    if not isinstance(state, dict):
+        raise TypeError("活动版本指针格式无效")
+    relative = state.get("active")
+    if relative == ".":
+        return instance
+    if not isinstance(relative, str) or not re.fullmatch(r"\.releases/[A-Za-z0-9_-]+", relative):
+        raise ValueError("活动版本目录无效")
+    runtime = instance / relative
+    if not safe_path(runtime):
+        raise ValueError("活动版本目录包含链接")
+    return runtime
+
+
+def rollback_runtime(instance: Path) -> bool:
+    """原子恢复活动版本；环境始终留在安装时的固定路径。"""
+    pointer = instance / "active-runtime.json"
+    if not pointer.is_file():
+        return False
+    current = runtime_path(instance)
+    state = json.loads(pointer.read_text("utf-8"))
+    previous = state.get("previous")
+    if previous != "." and (
+        not isinstance(previous, str)
+        or not re.fullmatch(r"\.releases/[A-Za-z0-9_-]+", previous)
+    ):
+        raise ValueError("旧版指针无效")
+    if not safe_path(instance / previous):
+        raise ValueError("旧版目录路径不安全")
+    _write_json(pointer, {"active": previous,
+                          "previous": current.relative_to(instance).as_posix(),
+                          "rolled_back": True})
+    return True
+
+
+def runtime_pending(instance: Path) -> bool:
+    pointer = instance / "active-runtime.json"
+    if not pointer.exists():
+        return False
+    runtime_path(instance)
+    return json.loads(pointer.read_text("utf-8")).get("pending_health") is True
+
+
+def confirm_runtime(instance: Path) -> None:
+    pointer = instance / "active-runtime.json"
+    if pointer.exists():
+        runtime_path(instance)
+        state = json.loads(pointer.read_text("utf-8"))
+        state["pending_health"] = False
+        _write_json(pointer, state)
+
+
+def prune_runtimes(instance: Path) -> None:
+    """只清理自举器拥有、且不属于活动与回滚版本的目录。"""
+    releases = instance / ".releases"
+    if not releases.is_dir() or not safe_path(releases):
+        return
+    protected = {runtime_path(instance)}
+    pointer = instance / "active-runtime.json"
+    if pointer.exists():
+        state = json.loads(pointer.read_text("utf-8"))
+        previous = state.get("previous")
+        if previous == "." or (isinstance(previous, str)
+                               and re.fullmatch(r"\.releases/[A-Za-z0-9_-]+", previous)):
+            protected.add(instance / previous)
+    for candidate in releases.iterdir():
+        if (candidate in protected or not candidate.name.startswith("release-")
+                or not candidate.is_dir() or not safe_path(candidate)):
+            continue
+        try:
+            owner = json.loads((candidate / ".bootstrap-runtime.json").read_text("utf-8"))
+            if owner != {"owner": "stock-robot-bootstrap-v1"}:
+                continue
+            # safe_path 已验证所有父路径，候选必为 releases 的直接子目录。
+            shutil.rmtree(candidate)
+        except (OSError, ValueError) as error:
+            logger.warning("旧版本目录未清理：%s（%s）", candidate, type(error).__name__)
+
+
 def venv_python(instance: Path) -> Path:
     return (
-        instance
+        runtime_path(instance)
         / "venv"
         / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     )
@@ -129,7 +215,7 @@ def venv_python(instance: Path) -> Path:
 
 def venv_launcher(instance: Path) -> Path:
     return (
-        instance
+        runtime_path(instance)
         / "venv"
         / ("Scripts/stock-robot.exe" if sys.platform == "win32" else "bin/stock-robot")
     )
@@ -432,8 +518,9 @@ async def run_command(
 
 def _source_info(instance: Path) -> dict[str, Any] | None:
     try:
+        instance = runtime_path(instance)
         info = json.loads((instance / "src/.bootstrap-source.json").read_text("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return None
     if not isinstance(info, dict) or not isinstance(info.get("archive_url"), str):
         return None
@@ -517,6 +604,23 @@ def _tag_archive(tag: str) -> str:
     return SOURCE_ARCHIVE_URL + quote(tag, safe="")
 
 
+def release_archive_url(tag: str) -> str:
+    """返回指定正式版本的源码归档地址。"""
+    return _tag_archive(tag)
+
+
+def source_release_tag(instance: Path) -> str | None:
+    """读取已安装源码对应的正式发布标签。"""
+    source = _source_info(instance)
+    tag = source.get("release_tag") if source else None
+    return tag if isinstance(tag, str) and tag else None
+
+
+def source_matches_release(instance: Path, release_tag: str) -> bool:
+    """仅将明确记录的正式版视为目标版本。"""
+    return source_release_tag(instance) == release_tag
+
+
 def _rate_limited(response: httpx.Response) -> bool:
     """普通权限拒绝不能触发备用渠道，403 需要明确的限流证据。"""
     if response.status_code == 429:
@@ -594,7 +698,11 @@ async def _latest_release(client: httpx.AsyncClient) -> tuple[str, dict[str, Any
 
 
 async def download_source(
-    archive_url: str | None, instance: Path, *, extras: str = ""
+    archive_url: str | None,
+    instance: Path,
+    *,
+    extras: str = "",
+    release_tag: str | None = None,
 ) -> StepResult:
     if _source_info(instance):
         return StepResult(True, "复用已校验源码")
@@ -608,7 +716,11 @@ async def download_source(
             temporary = Path(directory)
             archive = temporary / "source.zip"
             digest = hashlib.sha256()
-            release_info: dict[str, Any] = {}
+            release_info: dict[str, Any] = (
+                {"release_tag": release_tag, "release_resolution": "pinned"}
+                if release_tag is not None
+                else {}
+            )
             async with (
                 asyncio.timeout(DOWNLOAD_TIMEOUT_SECONDS),
                 httpx.AsyncClient(timeout=30, follow_redirects=True) as client,
@@ -640,7 +752,15 @@ async def download_source(
                     **release_info,
                 },
             )
-            source.replace(instance / "src")
+            for attempt in range(5):
+                try:
+                    source.replace(instance / "src")
+                    break
+                except PermissionError as error:
+                    if getattr(error, "winerror", None) not in {5, 32} or attempt == 4:
+                        raise
+                    logger.debug("源码目录暂时被占用，第 %s 次重试", attempt + 1)
+                    await asyncio.sleep(0.05)
         logger.info("自举源码下载完成：%s", redact(archive_url))
         return StepResult(True)
     except (
@@ -760,8 +880,8 @@ def write_config(instance: Path, llm: dict[str, Any] | None, port: int) -> StepR
 
 def instance_ready(instance: Path, extras: str) -> bool:
     try:
-        marker = json.loads((instance / "install-state.json").read_text("utf-8"))
-    except (OSError, ValueError):
+        marker = json.loads((runtime_path(instance) / "install-state.json").read_text("utf-8"))
+    except (OSError, ValueError, TypeError):
         return False
     source = _source_info(instance)
     return (
@@ -777,6 +897,58 @@ def instance_ready(instance: Path, extras: str) -> bool:
     )
 
 
+async def upgrade_instance(
+    instance: Path,
+    release_tag: str,
+    extras: str,
+    *,
+    runner: Runner,
+    install_timeout: float,
+    package_index_url: str,
+    progress: InstallProgress | None,
+) -> StepResult:
+    """在固定版本目录构建候选，原子切换指针；禁止搬迁虚拟环境。"""
+    if _source_info(instance) is None:
+        return StepResult(False, "当前实例来源记录不完整，不能自动升级")
+    if source_matches_release(instance, release_tag) and instance_ready(instance, extras):
+        return StepResult(True, "已是插件验证版本")
+    previous = runtime_path(instance)
+    releases = instance / ".releases"
+    if not safe_path(releases):
+        return StepResult(False, "版本目录路径不安全")
+    releases.mkdir(exist_ok=True)
+    prune_runtimes(instance)
+    candidate = Path(tempfile.mkdtemp(prefix="release-", dir=releases))
+    _write_json(candidate / ".bootstrap-runtime.json", {"owner": "stock-robot-bootstrap-v1"})
+    try:
+        if progress is not None:
+            progress.enter(1, f"下载已验证版本 {release_tag}")
+        result = await ensure_instance(
+            candidate,
+            release_archive_url(release_tag),
+            extras,
+            runner=runner,
+            install_timeout=install_timeout,
+            package_index_url=package_index_url,
+            progress=progress,
+            expected_release_tag=release_tag,
+        )
+        if not result.ok:
+            return StepResult(False, f"自动升级准备失败：{result.detail}")
+        if not source_matches_release(candidate, release_tag):
+            return StepResult(False, "自动升级候选版本与插件声明不一致")
+        _write_json(instance / "active-runtime.json", {
+            "active": candidate.relative_to(instance).as_posix(),
+            "previous": previous.relative_to(instance).as_posix(),
+            "pending_health": True,
+        })
+        logger.info("候选版本已启用，等待服务健康检查：%s", release_tag)
+        return StepResult(True, f"候选版本 {release_tag} 已就绪")
+    except (OSError, ValueError) as exc:
+        logger.warning("候选版本准备失败，保留旧版：%s", redact(str(exc)))
+        return StepResult(False, f"候选版本准备失败，保留旧版：{redact(str(exc))}")
+
+
 async def ensure_instance(
     instance: Path,
     archive_url: str | None,
@@ -786,20 +958,58 @@ async def ensure_instance(
     install_timeout: float = INSTALL_TIMEOUT_SECONDS,
     package_index_url: str = "",
     progress: InstallProgress | None = None,
+    expected_release_tag: str | None = None,
 ) -> StepResult:
     if not math.isfinite(install_timeout) or install_timeout <= 0:
         return StepResult(False, "安装总时限必须为大于 0 的有限秒数")
     if extras not in {"", "rag"}:
         return StepResult(False, "bootstrap_extras 仅接受空或 rag")
     if instance_ready(instance, extras):
-        return StepResult(True)
+        if expected_release_tag is None or source_matches_release(instance, expected_release_tag):
+            return StepResult(True)
+        return await upgrade_instance(
+            instance,
+            expected_release_tag,
+            extras,
+            runner=runner,
+            install_timeout=install_timeout,
+            package_index_url=package_index_url,
+            progress=progress,
+        )
+    active = runtime_path(instance)
+    if active != instance:
+        # extras 改变或产物缺失时也在新的固定目录构建，旧环境不就地改装。
+        repair_tag = expected_release_tag or source_release_tag(instance)
+        if repair_tag is None:
+            return StepResult(False, "活动版本缺少正式发布标签，不能自动修复")
+        return await upgrade_instance(
+            instance, repair_tag, extras, runner=runner,
+            install_timeout=install_timeout, package_index_url=package_index_url,
+            progress=progress,
+        )
     try:
         async with asyncio.timeout(install_timeout):
             if progress is not None:
                 progress.enter(1, "下载源码（已有校验源码将复用）")
-            result = await download_source(archive_url, instance, extras=extras)
+            source_archive = (
+                archive_url
+                if archive_url is not None
+                else (
+                    release_archive_url(expected_release_tag)
+                    if expected_release_tag is not None
+                    else None
+                )
+            )
+            result = await download_source(
+                source_archive,
+                instance,
+                extras=extras,
+                release_tag=expected_release_tag,
+            )
             if not result.ok:
                 return result
+            if expected_release_tag is not None and not source_matches_release(instance, expected_release_tag):
+                return StepResult(False, "现有源码与插件绑定版本不一致，请检查实例来源")
             result = await make_env(
                 instance,
                 extras,

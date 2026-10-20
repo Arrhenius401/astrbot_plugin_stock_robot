@@ -28,7 +28,8 @@ def plugin_main(monkeypatch, tmp_path):
     api.logger = logging.getLogger("plugin-test")
     event = ModuleType("astrbot.api.event")
     event.AstrMessageEvent = object
-    event.filter = SimpleNamespace(llm_tool=lambda **_: lambda function: function)
+    event.filter = SimpleNamespace(llm_tool=lambda **_: lambda function: function,
+                                   on_llm_request=lambda: lambda function: function)
     star = ModuleType("astrbot.api.star")
 
     class Star:
@@ -76,6 +77,155 @@ def test_plugin_modules_share_framework_logger(plugin_main, caplog):
     assert [record.getMessage() for record in caplog.records] == [
         f"日志来源：{module.__name__}" for module in modules
     ]
+
+
+@pytest.mark.asyncio
+async def test_unavailable_service_queues_group_shared_latest_three(plugin_main):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._launcher = SimpleNamespace(state="starting")
+    event = SimpleNamespace(unified_msg_origin="group")
+    try:
+        notes = []
+        for symbol in ("600519", "00700", "000001", "09988"):
+            await plugin._run_analysis(event, "stock", symbol, notes)
+        assert [x["symbol"] for x in plugin._pending.get("group")["targets"]] == [
+            "00700.HK", "000001", "09988.HK",
+        ]
+        assert "600519" in notes[-1]
+        assert plugin._delivery._reserved == 0
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("question_sent", [False, True])
+async def test_new_request_clears_waiting_queue_before_normal_analysis(plugin_main, question_sent):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._pending.enqueue("group", "stock", "00700")
+    record = plugin._pending.get("group")
+    if question_sent:
+        plugin._pending.asked("group", record["id"], "继续吗？")
+    plugin._launcher = SimpleNamespace(state="ready")
+
+    async def perform(*args):
+        assert plugin._pending.get("group") is None
+
+    plugin._perform_analysis = perform
+    event = SimpleNamespace(unified_msg_origin="group")
+    try:
+        await plugin._run_analysis(event, "stock", "600519", [])
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_confirmation_can_only_dispatch_current_session_once(plugin_main):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._pending.enqueue("group", "stock", "00700")
+    record = plugin._pending.get("group")
+    plugin._pending.asked("group", record["id"], "继续吗？")
+    executed = []
+
+    async def execute(event, batch):
+        executed.append(batch)
+
+    plugin._run_confirmed_batch = execute
+    try:
+        await plugin.confirm_waiting_analysis(SimpleNamespace(unified_msg_origin="other"), record["id"], "confirm")
+        assert not executed
+        # 未检查 sender_id；群内任意成员的明确确认有效。
+        event = SimpleNamespace(unified_msg_origin="group", sender_id="another-user")
+        await plugin.confirm_waiting_analysis(event, record["id"], "confirm")
+        await plugin.confirm_waiting_analysis(event, record["id"], "confirm")
+        await asyncio.gather(*list(plugin._analysis_tasks))
+        assert len(executed) == 1
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ai_failure_blocks_report_across_all_retries(plugin_main, monkeypatch):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    generated = []
+    reports = []
+
+    async def fail(*args):
+        generated.append(1)
+        raise TimeoutError("model")
+
+    async def no_delay(*args):
+        return None
+
+    async def deliver(*args):
+        reports.append(1)
+        return True
+
+    monkeypatch.setattr(plugin_main, "generate_text", fail)
+    monkeypatch.setattr(plugin_main.asyncio, "sleep", no_delay)
+    plugin._delivery.deliver_reserved = deliver
+    try:
+        await plugin._deliver_confirmed_report(SimpleNamespace(unified_msg_origin="group"), "report", "00700.HK", "stock")
+        assert len(generated) == 3
+        assert not reports
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reload_recovers_generated_report_without_reanalysis(plugin_main, monkeypatch):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._pending.enqueue("group", "stock", "00700")
+    queued = plugin._pending.get("group")
+    plugin._pending.asked("group", queued["id"], "继续吗？")
+    record = plugin._pending.confirm("group", queued["id"])
+    record["steps"] = [{"kind": "stock", "symbol": "00700.HK", "state": "report_ready",
+                        "markdown": "saved report", "bridge": "刚才的研报现在发给你。"}]
+    plugin._pending.save_accepted(record)
+    generated = []
+    delivered = []
+
+    async def forbidden(*args, **kwargs):
+        generated.append(1)
+        raise AssertionError("不能重新生成报告或文案")
+
+    async def deliver(event, markdown, *args):
+        delivered.append(markdown)
+        return True
+
+    async def send(*args):
+        pass
+
+    monkeypatch.setattr(plugin_main, "generate_text", forbidden)
+    plugin._client.analyze_stock = forbidden
+    plugin._delivery.deliver_reserved = deliver
+    try:
+        event = SimpleNamespace(unified_msg_origin="group", send=send, plain_result=lambda value: value)
+        await plugin._run_confirmed_batch(event, record)
+        assert delivered == ["saved report"]
+        assert not generated
+        assert plugin._pending.accepted() == []
+        assert plugin._delivery._reserved == 0
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reload_does_not_blindly_repeat_interrupted_analysis(plugin_main):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._pending.enqueue("group", "stock", "00700")
+    queued = plugin._pending.get("group")
+    plugin._pending.asked("group", queued["id"], "继续吗？")
+    record = plugin._pending.confirm("group", queued["id"])
+    record["steps"] = [{"kind": "stock", "symbol": "00700.HK", "state": "analyzing"}]
+    plugin._pending.save_accepted(record)
+    try:
+        await plugin._run_confirmed_batch(SimpleNamespace(unified_msg_origin="group"), record)
+        assert plugin._pending.accepted() == []
+        with plugin._pending._transaction() as conn:
+            body = conn.execute("SELECT body FROM accepted WHERE id=?", (record["id"],)).fetchone()[0]
+        assert "analysis_interrupted_unknown_result" in body
+    finally:
+        await plugin._client.aclose()
 
 
 @pytest.mark.parametrize(
@@ -130,7 +280,8 @@ def test_preparation_failure_never_analyzes(plugin_main, pending):
 
         plugin._launcher = SimpleNamespace(ensure_ready=ready)
         plugin._client.analyze_stock = forbidden
-        event = SimpleNamespace(send=send, plain_result=lambda value: value)
+        event = SimpleNamespace(send=send, plain_result=lambda value: value,
+                                unified_msg_origin="test")
         note = []
         try:
             await plugin._run_analysis(event, "stock", "600519", note)
@@ -176,6 +327,7 @@ def test_delivery_survives_analysis_tool_deadline(plugin_main):
         plugin._delivery._send_image = send_image
         event = SimpleNamespace(
             send=send,
+            unified_msg_origin="test",
             plain_result=lambda value: value,
             image_result=lambda value: f"image:{value}",
         )
@@ -247,11 +399,47 @@ def test_initialize_does_not_wait_for_provider(
                 assert (
                     Path(plugin_main.get_astrbot_data_path()) / "font.ttf"
                 ).is_file()
-            assert plugin._delivery.renderer.native_render == plugin.text_to_image
+            assert plugin._delivery.renderer.native_render == plugin_main._render_report
         finally:
             await plugin.terminate()
 
     run(scenario())
+
+
+def test_render_report_uses_local_t2i(plugin_main, monkeypatch):
+    calls = []
+
+    class Renderer:
+        async def render_t2i(self, text, *, use_network=True, return_url=True, template_name=None):
+            calls.append((text, use_network, return_url, template_name))
+            return "/tmp/report.jpg"
+
+    monkeypatch.setattr(
+        sys.modules["astrbot.core"], "html_renderer", Renderer(), raising=False
+    )
+    assert run(plugin_main._render_report("报告")) == "/tmp/report.jpg"
+    assert calls == [("报告", False, False, None)]
+
+
+def test_report_renderer_calls_real_local_wrapper_with_path_output(plugin_main, monkeypatch, tmp_path):
+    """贯通公共渲染器与真实包装函数，不能分别用兼容桩掩盖签名错误。"""
+    from PIL import Image
+
+    image_path = tmp_path / "local-t2i.png"
+    calls = []
+
+    class Renderer:
+        async def render_t2i(self, text, *, use_network=True, return_url=True, template_name=None):
+            calls.append((text, use_network, return_url, template_name))
+            Image.new("RGB", (80, 120), "white").save(image_path)
+            return str(image_path)
+
+    monkeypatch.setattr(sys.modules["astrbot.core"], "html_renderer", Renderer(), raising=False)
+    rendered = run(plugin_main.ReportRenderer(plugin_main._render_report).render("# 完整研报\n\n正文"))
+    assert (rendered.width, rendered.height) == (80, 120)
+    assert rendered.png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert calls == [("# 完整研报\n\n正文", False, False, None)]
+    assert not image_path.exists()
 
 
 def run(coro):
@@ -285,7 +473,8 @@ def test_analyze_stock_invalid_symbol_422():
     outcome = run(call_stock("999999"))
     assert outcome.ok is False
     assert "999999" in outcome.user_message
-    assert "6 位股票代码" in outcome.user_message
+    assert "A 股 6 位代码" in outcome.user_message
+    assert "00700.HK" in outcome.user_message
 
 
 @respx.mock
@@ -510,7 +699,8 @@ def test_empty_report_never_sends_blank_image_or_link(plugin_main):
         async def send(message):
             messages.append(message)
 
-        event = SimpleNamespace(send=send, plain_result=lambda value: value)
+        event = SimpleNamespace(send=send, plain_result=lambda value: value,
+                                unified_msg_origin="test")
         plugin._client.analyze_stock = analyze
         plugin._client.latest_report_id = report_id
         plugin._client.download_report = download

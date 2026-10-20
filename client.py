@@ -185,7 +185,8 @@ class StockRobotClient:
                     f"❌ 无法识别指数代码 {symbol}，请提供 6 位指数代码（如 000300、399006）",
                 )
             return AnalyzeOutcome(
-                False, f"❌ 无法识别代码 {symbol}，请提供 6 位股票代码（如 600519）"
+                False,
+                f"❌ 无法识别代码 {symbol}，请提供 A 股 6 位代码（如 600519）或港股 5 位代码（如 00700.HK）",
             )
 
         if resp.status_code >= 400:

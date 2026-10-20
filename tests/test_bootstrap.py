@@ -24,6 +24,173 @@ sys.modules[PACKAGE] = package
 bootstrap = importlib.import_module(f"{PACKAGE}.bootstrap")
 
 
+def installed_stub(instance, tag, extras=""):
+    (instance / "src").mkdir(parents=True, exist_ok=True)
+    (instance / "src/pyproject.toml").touch()
+    info = {"archive_url": bootstrap.release_archive_url(tag),
+            "archive_sha256": "a" * 64, "release_tag": tag}
+    (instance / "src/.bootstrap-source.json").write_text(json.dumps(info))
+    for path in (bootstrap.venv_python(instance), bootstrap.venv_launcher(instance)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    (instance / "install-state.json").write_text(json.dumps({
+        "version": 1, "extras": extras, "source": info,
+        "dependency_strategy": "locked-requirements-v1",
+    }))
+
+
+@pytest.mark.asyncio
+async def test_upgrade_keeps_venv_at_fixed_install_path_and_rolls_back(tmp_path, monkeypatch):
+    installed_stub(tmp_path, "v0.1.0")
+    (tmp_path / ".stock_robot").mkdir()
+    config = tmp_path / ".stock_robot/config.yaml"
+    config.write_text("llm: {enabled: false}")
+    (tmp_path / "reports").mkdir()
+    report = tmp_path / "reports/previous.md"
+    report.write_text("old report")
+    candidate_paths = []
+
+    async def install(candidate, *args, **kwargs):
+        candidate_paths.append(candidate)
+        installed_stub(candidate, "v0.2.0")
+        return bootstrap.StepResult(True)
+
+    monkeypatch.setattr(bootstrap, "ensure_instance", install)
+    result = await bootstrap.upgrade_instance(
+        tmp_path, "v0.2.0", "", runner=None, install_timeout=60,
+        package_index_url="", progress=None,
+    )
+    assert result.ok
+    assert bootstrap.runtime_path(tmp_path) == candidate_paths[0]
+    assert candidate_paths[0].is_dir()
+    assert bootstrap.source_matches_release(tmp_path, "v0.2.0")
+    assert bootstrap.instance_ready(tmp_path, "")
+    assert config.read_text() == "llm: {enabled: false}"
+    assert report.read_text() == "old report"
+    assert bootstrap.rollback_runtime(tmp_path)
+    assert bootstrap.runtime_path(tmp_path) == tmp_path
+    assert bootstrap.source_matches_release(tmp_path, "v0.1.0")
+
+
+@pytest.mark.asyncio
+async def test_upgrade_install_failure_leaves_original_runtime_active(tmp_path, monkeypatch):
+    installed_stub(tmp_path, "v0.1.0")
+
+    async def fail(*args, **kwargs):
+        return bootstrap.StepResult(False, "dependency failure")
+
+    monkeypatch.setattr(bootstrap, "ensure_instance", fail)
+    result = await bootstrap.upgrade_instance(
+        tmp_path, "v0.2.0", "", runner=None, install_timeout=60,
+        package_index_url="", progress=None,
+    )
+    assert not result.ok
+    assert bootstrap.runtime_path(tmp_path) == tmp_path
+    assert bootstrap.instance_ready(tmp_path, "")
+
+
+def test_runtime_pointer_rejects_escape_paths(tmp_path):
+    (tmp_path / "active-runtime.json").write_text(json.dumps({"active": "../other"}))
+    with pytest.raises(ValueError, match="目录"):
+        bootstrap.runtime_path(tmp_path)
+    assert not bootstrap.instance_ready(tmp_path, "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair", ["extras", "missing_launcher"])
+async def test_active_runtime_repair_never_installs_old_root_source(tmp_path, monkeypatch, repair):
+    installed_stub(tmp_path, "v0.1.0")
+    active = tmp_path / ".releases/release-current"
+    installed_stub(active, "v0.2.0")
+    (tmp_path / "active-runtime.json").write_text(json.dumps({
+        "active": ".releases/release-current", "previous": ".",
+    }))
+    extras = "rag" if repair == "extras" else ""
+    if repair == "missing_launcher":
+        bootstrap.venv_launcher(active).unlink()
+    built = []
+
+    async def download(url, candidate, *, extras, release_tag):
+        assert url == bootstrap.release_archive_url("v0.2.0")
+        installed_stub(candidate, release_tag, extras)
+        return bootstrap.StepResult(True)
+
+    async def env(candidate, *args, **kwargs):
+        built.append(candidate)
+        assert candidate != tmp_path and candidate != active
+        return bootstrap.StepResult(True)
+
+    async def runner(*args):
+        return 0, ""
+
+    monkeypatch.setattr(bootstrap, "download_source", download)
+    monkeypatch.setattr(bootstrap, "make_env", env)
+    result = await bootstrap.ensure_instance(tmp_path, None, extras, runner=runner)
+    assert result.ok
+    assert bootstrap.runtime_path(tmp_path) == built[0]
+    assert bootstrap.source_matches_release(tmp_path, "v0.2.0")
+    assert bootstrap.instance_ready(tmp_path, extras)
+    root_marker = json.loads((tmp_path / "install-state.json").read_text())
+    assert root_marker["source"]["release_tag"] == "v0.1.0"
+    assert root_marker["extras"] == ""
+
+
+def test_prune_only_removes_owned_unprotected_runtime(tmp_path):
+    active = tmp_path / ".releases/release-active"
+    stale = tmp_path / ".releases/release-stale"
+    unknown = tmp_path / ".releases/release-user"
+    for candidate in (active, stale, unknown):
+        candidate.mkdir(parents=True)
+    for candidate in (active, stale):
+        (candidate / ".bootstrap-runtime.json").write_text(json.dumps({"owner": "stock-robot-bootstrap-v1"}))
+    (tmp_path / "active-runtime.json").write_text(json.dumps({"active": ".releases/release-active", "previous": "."}))
+    bootstrap.prune_runtimes(tmp_path)
+    assert active.is_dir() and unknown.is_dir()
+    assert not stale.exists()
+
+
+def test_source_matches_only_explicit_pinned_release(tmp_path):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "pyproject.toml").touch()
+    (source / ".bootstrap-source.json").write_text(
+        json.dumps(
+            {
+                "archive_url": "https://example.org/v0.2.0.zip",
+                "archive_sha256": "a" * 64,
+                "release_tag": "v0.2.0",
+                "release_resolution": "pinned",
+            }
+        )
+    )
+
+    assert bootstrap.source_matches_release(tmp_path, "v0.2.0")
+    assert not bootstrap.source_matches_release(tmp_path, "v0.2.1")
+
+
+@pytest.mark.asyncio
+async def test_ready_instance_with_different_pinned_release_upgrades(tmp_path, monkeypatch):
+    monkeypatch.setattr(bootstrap, "instance_ready", lambda *_: True)
+    monkeypatch.setattr(bootstrap, "source_matches_release", lambda *_: False)
+    seen = {}
+
+    async def upgrade(*args, **kwargs):
+        seen["release_tag"] = args[1]
+        return bootstrap.StepResult(True, "已升级")
+
+    monkeypatch.setattr(bootstrap, "upgrade_instance", upgrade)
+    result = await bootstrap.ensure_instance(
+        tmp_path,
+        None,
+        "",
+        runner=lambda *_: None,
+        expected_release_tag="v0.2.0",
+    )
+
+    assert result.ok
+    assert seen == {"release_tag": "v0.2.0"}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("uv", [None, "C:/uv.exe"])
 async def test_custom_index_and_install_stages(tmp_path, monkeypatch, uv):

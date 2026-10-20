@@ -355,14 +355,15 @@ class ReportStorage:
                     or not math.isfinite(ended)
                 ):
                     continue
-                records.append((ended, path, path.stat().st_size))
+                retention = 72 * 3600 if record.get("stage") == "queued_delivery" else 7 * 86400
+                records.append((ended, path, path.stat().st_size, retention))
             except (OSError, ValueError, AttributeError):
                 continue
         total = sum(record[2] for record in records)
         for expired_pass in (True, False):
             for record in sorted(records):
-                ended, path, size = record
-                if (expired_pass and now - ended >= 7 * 86400) or (
+                ended, path, size, retention = record
+                if (expired_pass and now - ended >= retention) or (
                     not expired_pass and total > self.diagnostic_budget
                 ):
                     try:
