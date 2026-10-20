@@ -40,7 +40,8 @@ LATEST_RELEASE_URL = "https://github.com/Arrhenius401/stock_robot/releases/lates
 SOURCE_ARCHIVE_URL = (
     "https://codeload.github.com/Arrhenius401/stock_robot/zip/refs/tags/"
 )
-INSTALL_TIMEOUT_SECONDS = 2400
+INSTALL_TIMEOUT_SECONDS = 1800
+DEFAULT_PACKAGE_INDEX_URL = "https://pypi.tuna.tsinghua.edu.cn/simple"
 DOWNLOAD_TIMEOUT_SECONDS = 300
 Runner = Callable[[list[str], Path], Awaitable[tuple[int, str]]]
 
@@ -429,6 +430,21 @@ async def reap_process(process: asyncio.subprocess.Process) -> None:
     _owned_jobs.pop(process, None)
 
 
+def _command_environment(cmd: list[str]) -> dict[str, str] | None:
+    """仅显式指定包源的安装子进程隔离索引设置，不修改主进程环境。"""
+    if "install" not in cmd or not {"--index-url", "--default-index"}.intersection(cmd):
+        return None
+    environment = dict(os.environ)
+    for name in (
+        "UV_INDEX", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_NO_INDEX", "UV_CONFIG_FILE",
+        "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_NO_INDEX",
+    ):
+        environment.pop(name, None)
+    # pip 的空设备配置禁用配置文件读取；uv 同时在命令中使用 --no-config。
+    environment["PIP_CONFIG_FILE"] = os.devnull
+    return environment
+
+
 async def run_command(
     cmd: list[str],
     cwd: Path,
@@ -445,6 +461,7 @@ async def run_command(
         spawn_process(
             *cmd,
             cwd=cwd,
+            env=_command_environment(cmd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -782,6 +799,28 @@ async def download_source(
         return StepResult(False, f"源码准备失败：{reason}")
 
 
+def _source_failure(output: str) -> bool:
+    """仅识别可换源的安装错误，未知错误保守失败。"""
+    text = output.lower()
+    if any(marker in text for marker in (
+        "hash mismatch", "hashes", "hash does not match", "permission denied", "access is denied",
+        "no space left", "disk full", "requires-python", "requires a different python",
+        "not enough space", "disk quota exceeded", "certificate verify failed",
+        "certificate_verify_failed", "certificate has expired", "sslcertverificationerror",
+        "require a different python", "requires python", "requires python version",
+        "not a supported wheel", "unsupported platform", "not supported on this platform",
+        "failed building wheel", "failed to build", "安装命令超时",
+    )):
+        return False
+    return any(marker in text for marker in (
+        "connection refused", "connection reset", "connection aborted", "connecttimeout",
+        "readtimeout", "timed out", "temporary failure in name resolution", "name or service not known",
+        "failed to fetch", "failed to download", "network is unreachable", "could not fetch url",
+        "not found in the package registry", "503 service unavailable", "502 bad gateway",
+        "504 gateway", "403 forbidden", "404 not found", "429 too many requests",
+    ))
+
+
 async def make_env(
     instance: Path,
     extras: str,
@@ -818,17 +857,36 @@ async def make_env(
     if progress is not None:
         progress.enter(3, "安装依赖")
     prefix = (
-        [uv, "pip", "install", "--python", str(python)]
+        [uv, "--no-config", "pip", "install", "--python", str(python)]
         if uv
         else [str(python), "-m", "pip", "install"]
     )
-    if package_index_url:
-        prefix += ["--index-url", package_index_url]
+    requested = package_index_url.strip()
+    selected = requested or DEFAULT_PACKAGE_INDEX_URL
+    fallback = DEFAULT_PACKAGE_INDEX_URL if requested else ""
+    # 同一个显式清华源不能重复尝试；空字符串表示沿用工具自己的设置。
+    can_fallback = selected.rstrip("/") != fallback.rstrip("/")
+    index_flag = "--default-index" if uv else "--index-url"
     for arguments, stage in [
         (["--require-hashes", "-r", str(requirements)], "锁定依赖安装"),
         (["--no-deps", "-e", "."], "项目安装"),
     ]:
-        code, output = await runner(prefix + arguments, source)
+        index = [index_flag, selected] if selected else []
+        command = prefix if selected else [item for item in prefix if item != "--no-config"]
+        code, output = await runner(command + index + arguments, source)
+        if code and can_fallback and _source_failure(output):
+            previous = redact(selected) if selected else "安装工具原有设置"
+            selected = fallback
+            can_fallback = False
+            next_source = redact(selected) if selected else "安装工具原有设置"
+            message = f"{stage}遇到包源问题，从 {previous} 切换至 {next_source}，仅重试一次"
+            if progress is not None:
+                progress.emit(message)
+            else:
+                logger.warning("%s", message)
+            index = [index_flag, selected] if selected else []
+            command = prefix if selected else [item for item in prefix if item != "--no-config"]
+            code, output = await runner(command + index + arguments, source)
         if code:
             return StepResult(False, f"{stage}失败：{redact(output)}")
     return StepResult(True)

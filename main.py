@@ -18,13 +18,11 @@ from astrbot.core.utils.astrbot_path import (
 )
 
 from .bootstrap import (
-    DEFAULT_ARCHIVE_URL,
     INSTALL_TIMEOUT_SECONDS,
     InstallProgress,
     run_command,
 )
 from .client import (
-    DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT_SECONDS,
     ReportKind,
     StockRobotClient,
@@ -36,6 +34,7 @@ from .disk_support import FileLock
 from .font_support import ensure_chinese_font
 from .launcher import ServiceLauncher
 from .pending_queue import PendingQueue, canonical_symbol
+from .plugin_settings import migrate_port, resolve_legacy_extras
 from .report_delivery import ReportDelivery
 from .report_renderer import ReportRenderer
 from .report_storage import ReportStorage
@@ -115,9 +114,10 @@ class StockRobotPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        base_url = str(self.config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
-        self._base_url = base_url
         data_dir = Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_stock_robot"
+        self._extras = resolve_legacy_extras(config, data_dir / "instance")
+        base_url = f"http://127.0.0.1:{migrate_port(config, data_dir)}"
+        self._base_url = base_url
         self._storage = ReportStorage(data_dir)
         self._delivery = ReportDelivery(
             data_dir / "delivery_tmp",
@@ -125,7 +125,7 @@ class StockRobotPlugin(Star):
             storage=self._storage,
         )
         self._cleanup_uncertain = False
-        self._storage.cleanup_raw = bool(config.get("cleanup_previous_reports", False))
+        self._storage.cleanup_raw = bool(config.get("cleanup_previous_reports", True))
         self._storage.busy = lambda: self._delivery._reserved > 0
         self._storage.can_clean_raw = lambda: (
             not self._cleanup_uncertain
@@ -166,9 +166,9 @@ class StockRobotPlugin(Star):
         progress = InstallProgress(data_dir / "service.log")
         self._launcher = ServiceLauncher(
             base_url=self._base_url,
-            archive_url=self.config.get("source_archive_url") or DEFAULT_ARCHIVE_URL,
-            extras=str(self.config.get("bootstrap_extras") or ""),
-            auto_install=bool(self.config.get("auto_install", True)),
+            archive_url=None,
+            extras=self._extras,
+            auto_install=True,
             timeout=self._startup_timeout,
             data_dir=data_dir,
             llm=None,

@@ -421,6 +421,39 @@ def test_render_report_uses_local_t2i(plugin_main, monkeypatch):
     assert calls == [("报告", False, False, None)]
 
 
+def test_settings_defaults_and_explicit_legacy_values(plugin_main, monkeypatch):
+    async def scenario():
+        captured = []
+
+        class Launcher:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+
+            def start_background(self):
+                return None
+
+            async def stop(self):
+                return None
+
+        monkeypatch.setattr(plugin_main, "ServiceLauncher", Launcher)
+        monkeypatch.setattr(plugin_main, "ensure_chinese_font", lambda _: None)
+        for config, cleanup, timeout in [({}, True, 1800),
+                ({"cleanup_previous_reports": False, "install_timeout_seconds": 2400,
+                  "auto_install": False, "service_port": 18080}, False, 2400)]:
+            plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), config)
+            try:
+                await plugin.initialize()
+                assert plugin._storage.cleanup_raw is cleanup
+                assert plugin._install_timeout == timeout
+                assert captured[-1]["auto_install"] is True
+                assert captured[-1]["archive_url"] is None and captured[-1]["extras"] == ""
+                assert plugin._base_url == f"http://127.0.0.1:{config.get('service_port', 25618)}"
+            finally:
+                await plugin.terminate()
+
+    run(scenario())
+
+
 def test_report_renderer_calls_real_local_wrapper_with_path_output(plugin_main, monkeypatch, tmp_path):
     """贯通公共渲染器与真实包装函数，不能分别用兼容桩掩盖签名错误。"""
     from PIL import Image
