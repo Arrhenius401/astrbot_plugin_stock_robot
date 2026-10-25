@@ -548,7 +548,6 @@ class StockRobotPlugin(Star):
         def remaining() -> int:
             return max(1, int(deadline - asyncio.get_running_loop().time()))
 
-        await event.send(event.plain_result("正在准备分析服务，请稍候…"))
         if self._launcher is not None:
             outcome = await self._launcher.ensure_ready(
                 wait_timeout=max(

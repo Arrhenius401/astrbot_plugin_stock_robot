@@ -6,6 +6,7 @@ import logging
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -285,12 +286,39 @@ def test_preparation_failure_never_analyzes(plugin_main, pending):
         note = []
         try:
             await plugin._run_analysis(event, "stock", "600519", note)
+            assert len(calls) == 1
             assert "准备失败" in calls[-1] and "不要再调用工具" in note[-1]
             assert calls[-1].startswith("⏳" if pending else "❌")
         finally:
             await plugin._client.aclose()
 
     run(scenario())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind,symbol", [("stock", "00700.HK"), ("index", "000300")])
+async def test_ready_analysis_sends_only_one_progress_message(plugin_main, kind, symbol):
+    """服务就绪时只发送分析进度，避免连续出现两条等待提示。"""
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._launcher = SimpleNamespace(ensure_ready=AsyncMock(return_value=SimpleNamespace(ok=True)))
+    analyze = AsyncMock(return_value=SimpleNamespace(ok=True))
+    plugin._client.analyze_stock = analyze
+    plugin._client.analyze_index = analyze
+    plugin._client.latest_report_id = AsyncMock(return_value="report")
+    plugin._client.download_report = AsyncMock(return_value="# 报告")
+    event = SimpleNamespace(send=AsyncMock(), plain_result=lambda value: value)
+    try:
+        markdown = await plugin._perform_analysis(
+            event, kind, symbol, [], asyncio.get_running_loop().time() + 95
+        )
+        assert markdown == "# 报告"
+        analyze.assert_awaited_once()
+        actual_symbol, timeout = analyze.await_args.args
+        assert actual_symbol == symbol and 0 < timeout <= 95
+        event.send.assert_awaited_once_with(progress_message(symbol, timeout))
+        plugin._launcher.ensure_ready.assert_awaited_once()
+    finally:
+        await plugin._client.aclose()
 
 
 def test_delivery_survives_analysis_tool_deadline(plugin_main):
