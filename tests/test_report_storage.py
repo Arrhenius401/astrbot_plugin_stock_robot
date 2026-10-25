@@ -264,6 +264,12 @@ async def test_raw_cleanup_default_busy_and_ownership_gates(store):
     assert calls == ["raw"]
 
 
+def test_formatter_hash_matches_managed_v022_release():
+    assert report_storage.FORMATTER_SHA256 == (
+        "45b3bcb92f932ccdb11e3e7c6a76ccb628bdaa471206fceff7165d4850c4d7da"
+    )
+
+
 def test_raw_reports_verified_layout_and_unknown_files(store, monkeypatch):
     formatter = store.data_dir / "instance/src/src/report/formatter.py"
     formatter.parent.mkdir(parents=True)

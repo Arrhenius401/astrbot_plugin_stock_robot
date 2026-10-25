@@ -19,7 +19,8 @@ from astrbot.api import logger
 
 from .disk_support import FileLock, RotatingLog, safe_path
 
-FORMATTER_SHA256 = "c871162531a16c47f1b2e68e2153be2e0ff7e0166c52d28a19e34cdbc8a31250"
+# Stock Robot v0.2.2（main.py MANAGED_RELEASE_TAG）的 src/report/formatter.py；升级受管版本时同步更新。
+FORMATTER_SHA256 = "45b3bcb92f932ccdb11e3e7c6a76ccb628bdaa471206fceff7165d4850c4d7da"
 TASK_ID = re.compile(r"[0-9a-f]{32}")
 ARTIFACT = re.compile(r"(?:stock|index)_[A-Za-z0-9_-]{1,32}_\d{8}_\d{6}\.(?:md|png)")
 
