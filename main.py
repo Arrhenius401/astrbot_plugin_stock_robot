@@ -548,6 +548,8 @@ class StockRobotPlugin(Star):
         def remaining() -> int:
             return max(1, int(deadline - asyncio.get_running_loop().time()))
 
+        await event.send(event.plain_result(progress_message(symbol)))
+
         if self._launcher is not None:
             outcome = await self._launcher.ensure_ready(
                 wait_timeout=max(
@@ -570,9 +572,6 @@ class StockRobotPlugin(Star):
                 )
                 return
         effective_timeout = remaining()
-        await event.send(
-            event.plain_result(progress_message(symbol, effective_timeout))
-        )
 
         # 超时/取消或错误响应不能证明服务端分析停止；保持保守清理状态。
         try:

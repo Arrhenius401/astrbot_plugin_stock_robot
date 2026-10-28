@@ -36,12 +36,9 @@ def resolve_effective_timeout(config_timeout: int, tool_timeout: int | None) -> 
     )
 
 
-def progress_message(symbol: str, effective_timeout: int) -> str:
-    """分析开始前的进度提示，并展示本次实际生效的超时。"""
-    return (
-        f"⏳ 正在分析 {symbol}…首次分析约需 30~90 秒，请稍等"
-        f"（超时上限 {effective_timeout} 秒）"
-    )
+def progress_message(symbol: str) -> str:
+    """提示服务准备和分析正在进行。"""
+    return f"⏳ 正在准备服务并分析 {symbol}，请稍候。首次分析通常需要 30～90 秒。"
 
 
 def public_error_detail(value: str) -> str:
