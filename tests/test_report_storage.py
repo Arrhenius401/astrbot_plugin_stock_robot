@@ -264,9 +264,9 @@ async def test_raw_cleanup_default_busy_and_ownership_gates(store):
     assert calls == ["raw"]
 
 
-def test_formatter_hash_matches_managed_v022_release():
+def test_formatter_hash_matches_managed_release():
     assert report_storage.FORMATTER_SHA256 == (
-        "45b3bcb92f932ccdb11e3e7c6a76ccb628bdaa471206fceff7165d4850c4d7da"
+        "f061b9390b9e69e847c16cde7cb3d58df237762e6b32734013a3f2ec2a1a5142"
     )
 
 
