@@ -441,3 +441,63 @@ async def test_retention_failure_does_not_change_successful_send(tmp_path, monke
 
 def artifact(directory, suffix="md"):
     return next(directory.glob("*." + suffix), directory / ("report." + suffix))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("render_failure", [False, True])
+async def test_webchat_delivery_survives_closed_request(tmp_path, render_failure):
+    """原请求已关闭时，图片与文件兜底均通过会话接口交付。"""
+    service = manager(tmp_path, Renderer(OSError("绘图失败") if render_failure else None))
+    event = Event(session="webchat:FriendMessage:webchat!tester!conversation")
+    event.get_platform_name = lambda: "webchat"
+    received = Event()
+    sessions = []
+
+    async def send_session(session, message):
+        sessions.append(session)
+        await received.send(message)
+        return True
+
+    async def closed_request(message):
+        raise AssertionError("后台交付不能再发送到已关闭的请求")
+
+    service.send_message = send_session
+    event.send = closed_request
+    original = "# 完整中文报告\n\n正文"
+    await deliver(service, event, original)
+    assert sessions and set(sessions) == {event.unified_msg_origin}
+    if render_failure:
+        assert received.files[0][1].decode("utf-8") == original
+        assert "正在发送完整 Markdown" in received.messages[0]
+        assert all(not path.exists() for path in received.paths)
+    else:
+        assert len(received.messages) == 1 and received.messages[0].kind == "image"
+    assert service._reserved == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sender_missing", [False, True])
+async def test_webchat_missing_platform_is_delivery_failure(tmp_path, sender_missing):
+    service = manager(tmp_path)
+    event = Event()
+    event.get_platform_name = lambda: "webchat"
+
+    async def no_platform(session, message):
+        return False
+
+    service.send_message = None if sender_missing else no_platform
+    with pytest.raises(OSError, match="WebChat"):
+        await service._send(event, "报告")
+    assert not event.messages
+
+
+@pytest.mark.asyncio
+async def test_other_platform_keeps_event_delivery(tmp_path):
+    async def forbidden(*args):
+        raise AssertionError("其他平台不改用 WebChat 会话交付")
+
+    service = ReportDelivery(tmp_path, Renderer(), send_message=forbidden)
+    event = Event()
+    event.get_platform_name = lambda: "aiocqhttp"
+    await deliver(service, event)
+    assert len(event.messages) == 1 and event.messages[0].kind == "image"

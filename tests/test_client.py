@@ -849,3 +849,13 @@ def test_error_detail_redacts_before_truncation():
     detail = StockRobotClient._error_detail(response)
     assert "TEST_SECRET" not in detail
     assert len(detail) <= 200
+
+
+@pytest.mark.asyncio
+async def test_delivery_receives_framework_session_sender(plugin_main):
+    sender = AsyncMock(return_value=True)
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(send_message=sender), {})
+    try:
+        assert plugin._delivery.send_message is sender
+    finally:
+        await plugin._client.aclose()

@@ -9,7 +9,7 @@ import re
 import tempfile
 import uuid
 import zipfile
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -78,11 +78,13 @@ class ReportDelivery:
         renderer: ReportRenderer,
         limits: DeliveryLimits | None = None,
         storage: ReportStorage | None = None,
+        send_message: Callable[[str, Any], Awaitable[bool]] | None = None,
     ):
         self.temp_root = temp_root
         self.renderer = renderer
         self.limits = limits or DeliveryLimits()
         self.storage = storage
+        self.send_message = send_message
         self._reserved = 0
         self._closing = False
         self._tasks: set[asyncio.Task] = set()
@@ -171,9 +173,20 @@ class ReportDelivery:
             finally:
                 self._workers.discard(worker)
 
+    async def _send(self, event: Any, message: Any) -> None:
+        """WebChat 后台交付使用会话接口，避免依赖已结束的请求队列。"""
+        if getattr(event, "get_platform_name", lambda: "")() == "webchat":
+            if self.send_message is None:
+                raise FileDeliveryError("WebChat 会话发送接口不可用")
+            accepted = await self.send_message(str(event.unified_msg_origin), message)
+            if not accepted:
+                raise FileDeliveryError("WebChat 目标平台不可用")
+            return
+        await event.send(message)
+
     async def _notify(self, event: Any, message: str) -> None:
         try:
-            await asyncio.wait_for(event.send(event.plain_result(message)), timeout=5)
+            await asyncio.wait_for(self._send(event, event.plain_result(message)), timeout=5)
         except Exception as error:  # noqa: BLE001 — 消息平台边界，提示失败仍尝试交付文件
             logger.warning("报告提示发送失败: %s", type(error).__name__)
 
@@ -269,7 +282,7 @@ class ReportDelivery:
                 await asyncio.sleep(delay)
             try:
                 await asyncio.wait_for(
-                    event.send(event.chain_result([Image.fromBytes(image.png)])),
+                    self._send(event, event.chain_result([Image.fromBytes(image.png)])),
                     timeout=self.limits.image_timeout,
                 )
             finally:
@@ -346,7 +359,7 @@ class ReportDelivery:
         platform = getattr(event, "get_platform_name", lambda: "")()
         bot = getattr(event, "bot", None)
         if platform != "aiocqhttp" or bot is None:
-            await event.send(event.chain_result([File(name=path.name, file=str(path))]))
+            await self._send(event, event.chain_result([File(name=path.name, file=str(path))]))
             return
         try:
             remote_path = await self._upload_stream(bot, path)
@@ -358,7 +371,7 @@ class ReportDelivery:
             logger.warning(
                 "文件流上传不可用，尝试适配器文件发送: %s", type(error).__name__
             )
-            await event.send(event.chain_result([File(name=path.name, file=str(path))]))
+            await self._send(event, event.chain_result([File(name=path.name, file=str(path))]))
             return
         group = str(event.get_group_id() or "")
         target = group or str(event.get_sender_id())

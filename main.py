@@ -123,6 +123,7 @@ class StockRobotPlugin(Star):
             data_dir / "delivery_tmp",
             ReportRenderer(_render_report),
             storage=self._storage,
+            send_message=getattr(context, "send_message", None),
         )
         self._cleanup_uncertain = False
         self._storage.cleanup_raw = bool(config.get("cleanup_previous_reports", True))
