@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import hashlib
+import json
 import sys
 import threading
 import zipfile
@@ -501,3 +502,36 @@ async def test_other_platform_keeps_event_delivery(tmp_path):
     event.get_platform_name = lambda: "aiocqhttp"
     await deliver(service, event)
     assert len(event.messages) == 1 and event.messages[0].kind == "image"
+
+
+@pytest.mark.asyncio
+async def test_gold_webchat_delivery_retains_report_copy(tmp_path):
+    from stock_robot_plugin_test.report_storage import ReportStorage
+
+    storage = ReportStorage(tmp_path)
+    assert storage._lock.acquire()
+    storage.enabled = True
+    received = Event()
+
+    async def send_session(session, message):
+        assert session == "webchat:FriendMessage:webchat!user!session"
+        await received.send(message)
+        return True
+
+    service = ReportDelivery(storage.root, Renderer(), storage=storage, send_message=send_session)
+    event = Event(session="webchat:FriendMessage:webchat!user!session")
+    event.get_platform_name = lambda: "webchat"
+    try:
+        assert service.reserve()
+        service.submit(event, "黄金报告原文", "GOLD", "gold")
+        await asyncio.gather(*list(service._tasks))
+        await asyncio.sleep(0)
+        assert len(received.messages) == 1 and received.messages[0].kind == "image"
+        tasks = list(storage.root.iterdir())
+        assert len(tasks) == 1
+        meta = json.loads((tasks[0] / "task.json").read_text(encoding="utf-8"))
+        assert meta["kind"] == "gold" and meta["state"] == "success"
+        assert (tasks[0] / meta["files"][0]).read_text(encoding="utf-8") == "黄金报告原文"
+        assert any(name.endswith(".png") for name in meta["files"])
+    finally:
+        storage._lock.close()

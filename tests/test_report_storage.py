@@ -427,3 +427,53 @@ def test_file_lock_releases_after_close(tmp_path):
 
 def artifact(directory, suffix="md"):
     return next(directory.glob("*." + suffix), directory / ("report." + suffix))
+
+
+@pytest.mark.parametrize("state,hours", [("success", 24), ("failed", 72)])
+def test_gold_delivery_copies_expire_and_keep_diagnostics(store, state, hours):
+    task = store.begin("黄金报告原文", "GOLD", "gold")
+    assert task is not None
+    store.finish(task, SimpleNamespace(png=b"image", width=100, height=100),
+                 state, "complete", "")
+    directory = store.root / task
+    meta = json.loads((directory / "task.json").read_text(encoding="utf-8"))
+    assert meta["kind"] == "gold" and meta["symbol"] == "GOLD"
+    assert {Path(name).suffix for name in meta["files"]} == {".md", ".png"}
+    assert all(name.startswith("gold_GOLD_") for name in meta["files"])
+    assert artifact(directory).read_text(encoding="utf-8") == "黄金报告原文"
+    store.now[0] += hours * 3600 - 1
+    store.clean()
+    assert directory.exists()
+    store.now[0] += 1
+    store.clean()
+    assert not directory.exists()
+    diagnostic = json.loads((store.diagnostics / f"{task}.json").read_text(encoding="utf-8"))
+    assert diagnostic["kind"] == "gold" and diagnostic["cleanup_reason"] == "expired"
+
+
+def test_interrupted_gold_delivery_keeps_failure_retention_window(store):
+    task = store.begin("黄金报告原文", "GOLD", "gold")
+    assert task is not None
+    store.active.clear()
+    store.clean()
+    directory = store.root / task
+    assert json.loads((directory / "task.json").read_text())["state"] == "interrupted"
+    store.now[0] += 72 * 3600 - 1
+    store.clean()
+    assert directory.exists()
+    store.now[0] += 1
+    store.clean()
+    assert not directory.exists()
+
+
+def test_raw_cleanup_keeps_old_gold_reports(store, monkeypatch):
+    formatter = store.data_dir / "instance/src/src/report/formatter.py"
+    formatter.parent.mkdir(parents=True)
+    formatter.write_bytes(b"known")
+    monkeypatch.setattr(report_storage, "FORMATTER_SHA256", hashlib.sha256(b"known").hexdigest())
+    gold = store.data_dir / "instance/reports/gold/GOLD/2026-10/GOLD_20261001_120000_1234.md"
+    gold.parent.mkdir(parents=True)
+    gold.write_text("黄金原始报告", encoding="utf-8")
+    os.utime(gold, (store.now[0] - 20 * 86400,) * 2)
+    store.clean_raw()
+    assert gold.read_text(encoding="utf-8") == "黄金原始报告"

@@ -859,3 +859,193 @@ async def test_delivery_receives_framework_session_sender(plugin_main):
         assert plugin._delivery.send_message is sender
     finally:
         await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_gold_client_returns_this_response_without_latest_lookup():
+    route = respx.post(f"{BASE}/api/v1/gold").mock(
+        return_value=httpx.Response(200, json={"markdown": "# 黄金市场观察简报\n本次报告"})
+    )
+    client = StockRobotClient(BASE)
+    try:
+        result = await client.analyze_gold(42)
+        assert result.ok and result.markdown == "# 黄金市场观察简报\n本次报告"
+        assert route.calls.last.request.read() == b'{"refresh_cache":false}'
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,body,expected", [
+    (404, {"detail": "Not Found"}, "升级"),
+    (200, {"markdown": "  "}, "报告"),
+    (200, {"markdown": None}, "报告"),
+    (500, {"detail": "http://127.0.0.1:25618/internal"}, "分析失败"),
+])
+@respx.mock
+async def test_gold_client_failures_do_not_expose_service(status, body, expected):
+    respx.post(f"{BASE}/api/v1/gold").mock(return_value=httpx.Response(status, json=body))
+    client = StockRobotClient(BASE)
+    try:
+        result = await client.analyze_gold(30)
+        assert not result.ok and expected in result.user_message
+        assert "127.0.0.1" not in result.user_message
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_gold_client_timeout_is_visible():
+    respx.post(f"{BASE}/api/v1/gold").mock(side_effect=httpx.ReadTimeout("timeout"))
+    client = StockRobotClient(BASE)
+    try:
+        result = await client.analyze_gold(42)
+        assert not result.ok and "超时" in result.user_message
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gold_tool_uses_response_markdown_without_report_lookup(plugin_main):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._launcher = None
+    plugin._client.analyze_gold = AsyncMock(return_value=SimpleNamespace(ok=True, markdown="# 黄金报告"))
+    plugin._client.latest_report_id = AsyncMock(side_effect=AssertionError("黄金不得查询最新报告"))
+    event = SimpleNamespace(send=AsyncMock(), plain_result=lambda value: value)
+    try:
+        markdown = await plugin._perform_analysis(event, "gold", "GOLD", [], asyncio.get_running_loop().time() + 40)
+        assert markdown == "# 黄金报告"
+        plugin._client.analyze_gold.assert_awaited_once()
+        plugin._client.latest_report_id.assert_not_awaited()
+        event.send.assert_awaited_once()
+        assert "黄金" in event.send.await_args.args[0]
+        assert "30～90" not in event.send.await_args.args[0]
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gold_tool_dispatches_gold_kind_without_symbol_argument(plugin_main):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._run_analysis = AsyncMock(side_effect=lambda event, kind, symbol, note: note.append("已提交"))
+    try:
+        result = await plugin.analyze_gold(SimpleNamespace())
+        assert result == "已提交"
+        assert plugin._run_analysis.await_args.args[1:3] == ("gold", "GOLD")
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["黄金", "国内金价", "gold"])
+async def test_gold_partial_confirmation_accepts_natural_name(plugin_main, name):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._pending.enqueue("group", "stock", "600519")
+    plugin._pending.enqueue("group", "gold", "GOLD")
+    record = plugin._pending.get("group")
+    plugin._pending.asked("group", record["id"], "股票和黄金还要分析吗？")
+    plugin._run_confirmed_batch = AsyncMock()
+    try:
+        await plugin.confirm_waiting_analysis(SimpleNamespace(unified_msg_origin="group"), record["id"], "confirm", name)
+        await asyncio.gather(*list(plugin._analysis_tasks))
+        accepted = plugin._run_confirmed_batch.await_args.args[1]
+        assert accepted["targets"] == [{"kind": "gold", "symbol": "GOLD"}]
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gold_end_to_end_submits_exact_response_to_delivery(plugin_main):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._launcher = None
+    plugin._client.analyze_gold = AsyncMock(return_value=SimpleNamespace(ok=True, markdown="# 本次黄金报告"))
+    plugin._delivery.submit = lambda event, markdown, symbol, kind: delivered.append((markdown, symbol, kind))
+    delivered = []
+    event = SimpleNamespace(unified_msg_origin="session", send=AsyncMock(), plain_result=lambda x: x)
+    try:
+        note = []
+        await plugin._run_analysis(event, "gold", "GOLD", note)
+        assert delivered == [("# 本次黄金报告", "GOLD", "gold")]
+        assert "后台发送" in note[-1]
+    finally:
+        plugin._delivery.release()
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("kind", "symbol"), [("gold", "GOLD"), ("stock", "600519"), ("index", "000300")])
+async def test_confirmed_webchat_batch_uses_session_after_request_closes(plugin_main, monkeypatch, kind, symbol):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._pending.enqueue("webchat:FriendMessage:webchat!u!c", kind, symbol)
+    record = plugin._pending.get("webchat:FriendMessage:webchat!u!c")
+    plugin._pending.asked(record["umo"], record["id"], "黄金还分析吗？")
+    batch_events = []
+
+    class ProactiveEvent:
+        def __init__(self, context, umo):
+            self.unified_msg_origin = umo
+
+    async def execute(event, batch):
+        batch_events.append(event)
+
+    monkeypatch.setattr(plugin_main, "SessionEvent", ProactiveEvent)
+    plugin._run_confirmed_batch = execute
+    original = SimpleNamespace(unified_msg_origin=record["umo"], get_platform_name=lambda: "webchat")
+    try:
+        await plugin.confirm_waiting_analysis(original, record["id"], "confirm")
+        await asyncio.gather(*list(plugin._analysis_tasks))
+        assert len(batch_events) == 1 and isinstance(batch_events[0], ProactiveEvent)
+        assert batch_events[0].unified_msg_origin == record["umo"]
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_gold_webchat_completes_after_request_closes(plugin_main, monkeypatch):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    umo = "webchat:FriendMessage:webchat!u!c"
+    plugin._pending.enqueue(umo, "gold", "GOLD")
+    record = plugin._pending.get(umo)
+    plugin._pending.asked(umo, record["id"], "黄金还需要分析吗？")
+    messages = []
+    bridge_facts = []
+
+    class ProactiveEvent:
+        def __init__(self, context, origin):
+            self.unified_msg_origin = origin
+
+        def plain_result(self, text):
+            return text
+
+        async def send(self, text):
+            messages.append(text)
+
+    async def bridge(context, origin, facts):
+        bridge_facts.append(facts)
+        return "黄金报告准备好了。"
+
+    async def deliver(event, markdown, symbol, kind):
+        assert isinstance(event, ProactiveEvent)
+        messages.append((markdown, symbol, kind))
+        return True
+
+    async def closed_request(message):
+        raise AssertionError("不能复用结束的 WebChat 请求")
+
+    monkeypatch.setattr(plugin_main, "SessionEvent", ProactiveEvent)
+    monkeypatch.setattr(plugin_main, "generate_text", bridge)
+    plugin._launcher = None
+    plugin._client.analyze_gold = AsyncMock(return_value=SimpleNamespace(ok=True, markdown="# 本次黄金报告"))
+    plugin._delivery.deliver_reserved = deliver
+    event = SimpleNamespace(unified_msg_origin=umo, get_platform_name=lambda: "webchat", send=closed_request)
+    try:
+        await plugin.confirm_waiting_analysis(event, record["id"], "confirm", "黄金")
+        await asyncio.gather(*list(plugin._analysis_tasks))
+        assert messages[-1] == ("# 本次黄金报告", "GOLD", "gold")
+        assert bridge_facts[0]["kind"] == "gold" and bridge_facts[0]["symbol"] == "GOLD"
+        assert plugin._client.analyze_gold.await_count == 1
+        assert not plugin._pending.accepted() and plugin._delivery._reserved == 0
+    finally:
+        await plugin._client.aclose()

@@ -43,6 +43,7 @@ async def generate_text(context: Any, umo: str, facts: dict) -> str:
         contexts=[],
         system_prompt=("你负责为股票分析助手生成一条简短、自然的中文消息。"
                        "严格依据输入事实，不调用工具，不声称已分析或已投递尚未完成的报告。"
+                       "kind 为 gold 且 symbol 为 GOLD 表示黄金市场观察简报，不是股票代码。"
                        "询问时列出全部标的并问是否仍需要分析；末次提醒须说明已取消积压任务，"
                        "如仍需要可以重新提出。只输出发给用户的正文。"),
     )

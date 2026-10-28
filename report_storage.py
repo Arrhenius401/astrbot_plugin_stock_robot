@@ -22,7 +22,7 @@ from .disk_support import FileLock, RotatingLog, safe_path
 # Stock Robot v0.2.2（main.py MANAGED_RELEASE_TAG）的 src/report/formatter.py；升级受管版本时同步更新。
 FORMATTER_SHA256 = "45b3bcb92f932ccdb11e3e7c6a76ccb628bdaa471206fceff7165d4850c4d7da"
 TASK_ID = re.compile(r"[0-9a-f]{32}")
-ARTIFACT = re.compile(r"(?:stock|index)_[A-Za-z0-9_-]{1,32}_\d{8}_\d{6}\.(?:md|png)")
+ARTIFACT = re.compile(r"(?:stock|index|gold)_[A-Za-z0-9_-]{1,32}_\d{8}_\d{6}\.(?:md|png)")
 
 
 def serialized(function):
@@ -167,7 +167,7 @@ class ReportStorage:
                 raise OSError("任务目录不安全")
             directory.mkdir(mode=0o700, parents=True)
             safe_symbol = re.sub(r"[^A-Za-z0-9_-]", "_", symbol)[:32] or "report"
-            if kind not in {"stock", "index"}:
+            if kind not in {"stock", "index", "gold"}:
                 raise ValueError("未知报告类型")
             started = self.clock()
             filename = f"{kind}_{safe_symbol}_{datetime.fromtimestamp(started).astimezone():%Y%m%d_%H%M%S}.md"

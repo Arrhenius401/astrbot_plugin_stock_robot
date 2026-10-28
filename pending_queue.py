@@ -17,8 +17,12 @@ MAX_TARGETS = 3
 
 
 def canonical_symbol(kind: str, raw: str) -> str:
-    """合并同一港股的常用写法；股票与指数仍是不同任务类型。"""
+    """合并同一港股的常用写法，并固定黄金市场简报的内部身份。"""
     value = raw.strip().upper()
+    if kind == "gold":
+        if value != "GOLD":
+            raise ValueError("黄金分析标识无效")
+        return "GOLD"
     if kind not in {"stock", "index"}:
         raise ValueError("未知分析类型")
     if kind == "stock":

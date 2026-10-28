@@ -16,7 +16,7 @@ DEFAULT_TIMEOUT_SECONDS = 100
 TIMEOUT_MARGIN = 15
 MIN_EFFECTIVE_TIMEOUT = 10
 
-ReportKind = Literal["stock", "index"]
+ReportKind = Literal["stock", "index", "gold"]
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class AnalyzeOutcome:
 
     ok: bool
     user_message: str = ""
+    markdown: str = ""
 
 
 def resolve_effective_timeout(config_timeout: int, tool_timeout: int | None) -> int:
@@ -86,6 +87,37 @@ class StockRobotClient:
         return await self._analyze(
             "/api/v1/index", symbol, effective_timeout, is_index=True
         )
+
+    async def analyze_gold(self, effective_timeout: int) -> AnalyzeOutcome:
+        """生成黄金简报，直接返回本次请求对应的 Markdown。"""
+        try:
+            resp = await self._http.post(
+                f"{self._base_url}/api/v1/gold",
+                json={"refresh_cache": False},
+                timeout=effective_timeout,
+            )
+        except httpx.TimeoutException:
+            logger.warning("黄金分析请求超时（上限 %s 秒）", effective_timeout)
+            return AnalyzeOutcome(False, "⏱️ 黄金分析超时，请稍后重试或调大插件超时配置。")
+        except httpx.HTTPError as exc:
+            logger.warning("黄金分析服务连接失败: %s", redact(str(exc)))
+            return AnalyzeOutcome(False, "❌ 分析服务未启动，请检查插件日志或服务配置。")
+        if resp.status_code == 404:
+            return AnalyzeOutcome(False, "❌ 当前分析服务不支持黄金分析，请升级至支持黄金的 Stock Robot 版本。")
+        if resp.status_code >= 400:
+            detail = self._error_detail(resp)
+            logger.warning("黄金分析请求失败 HTTP %s: %s", resp.status_code, detail)
+            return AnalyzeOutcome(False, f"❌ 黄金分析失败：{public_error_detail(detail)}")
+        try:
+            data = resp.json()
+        except ValueError:
+            logger.warning("黄金分析响应不是有效 JSON")
+            return AnalyzeOutcome(False, "❌ 黄金报告结果异常，请稍后重试。")
+        markdown = data.get("markdown") if isinstance(data, dict) else None
+        if not isinstance(markdown, str) or not markdown.strip():
+            logger.warning("黄金分析响应缺少报告正文")
+            return AnalyzeOutcome(False, "❌ 黄金报告正文不可用，请稍后重试。")
+        return AnalyzeOutcome(True, markdown=markdown)
 
     async def latest_report_id(
         self, kind: ReportKind, query: str, effective_timeout: int

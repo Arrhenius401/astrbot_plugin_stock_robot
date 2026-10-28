@@ -261,6 +261,10 @@ class StockRobotPlugin(Star):
         if action != "confirm":
             return "回答不明确，尚未执行任何分析。"
         chosen = [x.strip() for x in symbols.split(",") if x.strip()] if symbols else None
+        if chosen and any(item.get("kind") == "gold" for item in record["targets"]):
+            gold_aliases = {"黄金", "国内黄金", "国际黄金", "国内金价", "国际金价", "金价"}
+            chosen = ["GOLD" if value in gold_aliases or value.casefold() == "gold" else value
+                      for value in chosen]
         try:
             accepted = self._pending.confirm(umo, batch_id, symbols=chosen)
         except ValueError:
@@ -273,6 +277,8 @@ class StockRobotPlugin(Star):
     def _start_batch(self, event, record):
         if record["id"] in self._batch_tasks or self._stopping:
             return
+        if getattr(event, "get_platform_name", lambda: "")() == "webchat":
+            event = SessionEvent(self.context, record["umo"])
         task = asyncio.create_task(self._run_confirmed_batch(event, record))
         self._batch_tasks[record["id"]] = task
         self._analysis_tasks.add(task)
@@ -362,7 +368,7 @@ class StockRobotPlugin(Star):
                     async with asyncio.timeout(30):
                         if bridge is None:
                             bridge = await generate_text(self.context, event.unified_msg_origin, {
-                                "event": "report_ready", "symbol": symbol,
+                                "event": "report_ready", "symbol": symbol, "kind": kind,
                                 "fact": "用户已确认；报告已生成，即将发送，尚未送达",
                             })
                             saved["bridge"] = bridge
@@ -419,6 +425,17 @@ class StockRobotPlugin(Star):
         """
         note: list[str] = []
         await self._run_analysis(event, "index", symbol, note)
+        return note[-1] if note else "流程已结束。只回一句简短确认，不要再调用工具。"
+
+    @filter.llm_tool(name="analyze_gold")
+    async def analyze_gold(self, event: AstrMessageEvent):
+        """生成国内与国际黄金市场观察简报，发送完整报告。
+
+        用户询问黄金、国内金价、国际金价或黄金市场走势时使用；
+        黄金股票、黄金 ETF 与首饰价格不使用本工具。
+        """
+        note: list[str] = []
+        await self._run_analysis(event, "gold", "GOLD", note)
         return note[-1] if note else "流程已结束。只回一句简短确认，不要再调用工具。"
 
     # ------------------------------------------------------------------
@@ -549,7 +566,9 @@ class StockRobotPlugin(Star):
         def remaining() -> int:
             return max(1, int(deadline - asyncio.get_running_loop().time()))
 
-        await event.send(event.plain_result(progress_message(symbol)))
+        message = ("⏳ 正在准备服务并分析黄金市场，请稍候。"
+                   if kind == "gold" else progress_message(symbol))
+        await event.send(event.plain_result(message))
 
         if self._launcher is not None:
             outcome = await self._launcher.ensure_ready(
@@ -578,8 +597,10 @@ class StockRobotPlugin(Star):
         try:
             if kind == "stock":
                 outcome = await self._client.analyze_stock(symbol, effective_timeout)
-            else:
+            elif kind == "index":
                 outcome = await self._client.analyze_index(symbol, effective_timeout)
+            else:
+                outcome = await self._client.analyze_gold(effective_timeout)
         except BaseException:
             self._cleanup_uncertain = True
             raise
@@ -590,6 +611,9 @@ class StockRobotPlugin(Star):
                 "分析失败，原因已直接发给用户。只回一句简短确认，不要编造分析内容，不要再调用工具。"
             )
             return
+
+        if kind == "gold":
+            return outcome.markdown
 
         report_id = await self._client.latest_report_id(kind, symbol, remaining())
         markdown = (

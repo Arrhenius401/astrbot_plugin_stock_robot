@@ -134,3 +134,22 @@ async def test_one_failed_final_reminder_does_not_drop_other_sessions(tmp_path, 
         await notify_waiting(queue, context, now=1810)
     assert [umo for umo, _ in messages] == ["second"]
     assert queue.all() == []
+
+
+@pytest.mark.asyncio
+async def test_gold_recovery_question_identifies_gold_as_market_brief(tmp_path, messaging):
+    context, messages, _ = messaging
+    queue = PendingQueue(tmp_path / "queue.db")
+    queue.enqueue("group", "gold", "GOLD")
+    calls = []
+
+    async def generate(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(completion_text="黄金市场简报现在可以继续，需要吗？")
+
+    context.llm_generate = generate
+    await notify_waiting(queue, context, now=10)
+    assert '"kind": "gold"' in calls[0]["prompt"]
+    assert '"symbol": "GOLD"' in calls[0]["prompt"]
+    assert "黄金市场" in calls[0]["system_prompt"]
+    assert len(messages) == 1

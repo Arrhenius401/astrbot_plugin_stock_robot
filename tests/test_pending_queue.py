@@ -100,3 +100,31 @@ def test_confirm_at_deadline_never_executes(tmp_path):
     queue.asked("group", record["id"], "继续吗？", now=10)
     assert queue.confirm("group", record["id"], now=1810) is None
     assert len(queue.expire(now=1810)) == 1
+
+
+def test_gold_queue_deduplicates_and_survives_reload_with_old_targets(tmp_path):
+    path = tmp_path / "waiting.sqlite3"
+    original = pending.PendingQueue(path)
+    original.enqueue("group", "stock", "00700")
+    original.enqueue("group", "index", "000300")
+    original.enqueue("group", "gold", "gold")
+    assert original.enqueue("group", "gold", " GOLD ") is None
+    restored = pending.PendingQueue(path)
+    record = restored.get("group")
+    assert record["targets"] == [
+        {"kind": "stock", "symbol": "00700.HK"},
+        {"kind": "index", "symbol": "000300"},
+        {"kind": "gold", "symbol": "GOLD"},
+    ]
+    assert restored.asked("group", record["id"], "继续分析吗？", now=10)
+    accepted = restored.confirm("group", record["id"], symbols=["GOLD"], now=11)
+    assert accepted["targets"] == [{"kind": "gold", "symbol": "GOLD"}]
+    assert pending.PendingQueue(path).accepted()[0]["targets"] == accepted["targets"]
+
+
+@pytest.mark.parametrize("symbol", ["", "600519", "XAU", "GOLD2"])
+def test_gold_queue_rejects_other_symbols(tmp_path, symbol):
+    queue = pending.PendingQueue(tmp_path / "waiting.sqlite3")
+    with pytest.raises(ValueError):
+        queue.enqueue("group", "gold", symbol)
+    assert queue.get("group") is None
