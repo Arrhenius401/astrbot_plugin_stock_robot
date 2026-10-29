@@ -212,7 +212,7 @@ async def test_stopping_waits_for_render_worker_and_releases_reservation(tmp_pat
     started, finish = asyncio.Event(), asyncio.Event()
 
     class BlockingRenderer:
-        async def render(self, *_):
+        async def render(self, *_, **kwargs):
             started.set()
             try:
                 await asyncio.Event().wait()
@@ -237,7 +237,7 @@ async def test_render_timeout_waits_for_native_cleanup_before_file_fallback(tmp_
     started, cleaning, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class BlockingRenderer:
-        async def render(self, *_):
+        async def render(self, *_, **kwargs):
             started.set()
             try:
                 await asyncio.Event().wait()
@@ -266,7 +266,7 @@ async def test_repeated_stop_cancellation_cannot_release_render_slot_early(tmp_p
     cleaning, finish = asyncio.Event(), asyncio.Event()
 
     class ClosingRenderer:
-        async def render(self, *_):
+        async def render(self, *_, **kwargs):
             try:
                 await asyncio.Event().wait()
             finally:
@@ -538,12 +538,12 @@ async def test_gold_webchat_delivery_retains_report_copy(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind, expected", [("gold", {"width": 1200}), ("stock", {}), ("index", {})])
+@pytest.mark.parametrize("kind, expected", [("gold", {"width": 1200}), ("stock", {}), ("index", {"width": 1200})])
 async def test_report_kind_selects_width(tmp_path, kind, expected):
     class WidthRenderer:
         async def render(self, markdown, **kwargs):
             assert markdown == "原文" and kwargs == expected
-            return RenderedReport(b"image", 1200 if kind == "gold" else 800, 100)
+            return RenderedReport(b"image", 1200 if kind in {"gold", "index"} else 800, 100)
 
     event = Event()
     service = manager(tmp_path, WidthRenderer())

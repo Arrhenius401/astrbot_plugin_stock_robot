@@ -49,7 +49,7 @@ async def _render_report(
 ) -> str:
     """使用 AstrBot 本地 Markdown 渲染，避免远程 T2I 对长报告返回非图片。"""
     if width != 800:
-        # 本地策略接口固定 800px；黄金宽表直接复用底层渲染器。
+        # 本地策略接口固定 800px；指数和黄金宽表复用底层渲染器。
         from astrbot.core.utils.io import save_temp_img
         from astrbot.core.utils.t2i.local_strategy import MarkdownRenderer
 

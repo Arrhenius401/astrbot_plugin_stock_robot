@@ -153,7 +153,7 @@ class ReportDelivery:
 
     async def _render(self, markdown: str, kind: str = "stock") -> RenderedReport:
         async with self._render_gate:
-            options = {"width": 1200} if kind == "gold" else {}
+            options = {"width": 1200} if kind in {"gold", "index"} else {}
             worker = asyncio.create_task(self.renderer.render(markdown, **options))
             self._workers.add(worker)
             try:
