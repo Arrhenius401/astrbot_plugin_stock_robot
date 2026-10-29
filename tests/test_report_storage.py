@@ -266,7 +266,7 @@ async def test_raw_cleanup_default_busy_and_ownership_gates(store):
 
 def test_formatter_hash_matches_managed_release():
     assert report_storage.FORMATTER_SHA256 == (
-        "f061b9390b9e69e847c16cde7cb3d58df237762e6b32734013a3f2ec2a1a5142"
+        "40b9779816eee0d657b615812deec86669b5479ef233c59bef64c6c29008b536"
     )
 
 
@@ -282,12 +282,17 @@ def test_raw_reports_verified_layout_and_unknown_files(store, monkeypatch):
     month = store.data_dir / "instance/reports/index/000300/2026-10"
     month.mkdir(parents=True)
     old = month / "000300_20261001_120000.md"
+    paired = month / "000300_20261001_120001.md"
+    snapshot = paired.with_suffix(".report.json")
+    new_index = month / "000300_20261001_120002_1234567890abcdef1234567890abcdef.md"
     recent = month / "000300_20261010_120000.md"
     unknown = month / "user-report.md"
-    for path in (old, recent, unknown):
+    for path in (old, recent, unknown, paired, snapshot, new_index):
         path.write_text("keep unless expired known report")
         os.utime(path, (store.now[0], store.now[0]))
     os.utime(old, (store.now[0] - 7 * 86400 - 1,) * 2)
+    os.utime(paired, (store.now[0] - 20 * 86400,) * 2)
+    os.utime(new_index, (store.now[0] - 20 * 86400,) * 2)
     os.utime(unknown, (store.now[0] - 20 * 86400,) * 2)
     formatter.write_bytes(b"unsupported version")
     store.clean_raw()
@@ -295,6 +300,7 @@ def test_raw_reports_verified_layout_and_unknown_files(store, monkeypatch):
     formatter.write_bytes(b"verified fixture formatter")
     store.clean_raw()
     assert not old.exists() and recent.exists() and unknown.exists()
+    assert paired.exists() and snapshot.exists() and new_index.exists()
 
 
 def test_raw_removes_only_verified_empty_subdirectories(store, monkeypatch):

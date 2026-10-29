@@ -20,7 +20,7 @@ from astrbot.api import logger
 from .disk_support import FileLock, RotatingLog, safe_path
 
 # 与 main.py MANAGED_RELEASE_TAG 对应的 src/report/formatter.py；升级受管版本时同步更新。
-FORMATTER_SHA256 = "f061b9390b9e69e847c16cde7cb3d58df237762e6b32734013a3f2ec2a1a5142"
+FORMATTER_SHA256 = "40b9779816eee0d657b615812deec86669b5479ef233c59bef64c6c29008b536"
 TASK_ID = re.compile(r"[0-9a-f]{32}")
 ARTIFACT = re.compile(r"(?:stock|index|gold)_[A-Za-z0-9_-]{1,32}_\d{8}_\d{6}\.(?:md|png)")
 
@@ -448,6 +448,9 @@ class ReportStorage:
                         if (
                             safe_path(path)
                             and path.is_file()
+                            # 有结构快照时保留整组，避免破坏报告库与重试。
+                            and not path.with_suffix(".report.json").exists()
+                            and not path.with_suffix(".report.json").is_symlink()
                             and self.clock() - path.stat().st_mtime > 7 * 86400
                         ):
                             path.unlink()
