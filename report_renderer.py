@@ -24,8 +24,9 @@ class ReportRenderer:
     def __init__(self, native_render: Callable[..., Awaitable[str]]):
         self.native_render = native_render
 
-    async def render(self, markdown: str) -> RenderedReport:
-        path = Path(await self.native_render(markdown, return_url=False))
+    async def render(self, markdown: str, *, width: int = 800) -> RenderedReport:
+        options = {"width": width} if width != 800 else {}
+        path = Path(await self.native_render(markdown, return_url=False, **options))
         worker = asyncio.create_task(asyncio.to_thread(self._read, path))
         cancelled = False
         while not worker.done():
@@ -49,8 +50,8 @@ class ReportRenderer:
 
         try:
             with Image.open(path) as image:
-                if image.width * image.height > 32_000_000:
-                    raise ReportTooLarge("原生图片超过 3200 万像素")
+                if image.width * image.height > 24_000_000:
+                    raise ReportTooLarge("原生图片超过 2400 万像素")
                 output = BytesIO()
                 image.save(output, format="PNG")
                 return RenderedReport(output.getvalue(), image.width, image.height)

@@ -66,7 +66,7 @@ class Renderer:
     def __init__(self, error=None):
         self.error = error
 
-    async def render(self, markdown):
+    async def render(self, markdown, **kwargs):
         if self.error:
             raise self.error
         return RenderedReport(markdown.encode(), 1200, 6000)
@@ -403,7 +403,7 @@ async def test_cancelled_delivery_keeps_report_after_render_worker(tmp_path):
     entered = asyncio.Event()
 
     class BlockingRenderer:
-        async def render(self, markdown):
+        async def render(self, markdown, **kwargs):
             entered.set()
             await asyncio.Future()
 
@@ -535,3 +535,20 @@ async def test_gold_webchat_delivery_retains_report_copy(tmp_path):
         assert any(name.endswith(".png") for name in meta["files"])
     finally:
         storage._lock.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, expected", [("gold", {"width": 1200}), ("stock", {}), ("index", {})])
+async def test_report_kind_selects_width(tmp_path, kind, expected):
+    class WidthRenderer:
+        async def render(self, markdown, **kwargs):
+            assert markdown == "原文" and kwargs == expected
+            return RenderedReport(b"image", 1200 if kind == "gold" else 800, 100)
+
+    event = Event()
+    service = manager(tmp_path, WidthRenderer())
+    assert service.reserve()
+    service.submit(event, "原文", "GOLD" if kind == "gold" else "000300", kind)
+    await asyncio.gather(*list(service._tasks))
+    assert len(event.messages) == 1 and event.messages[0].kind == "image"
+    assert not event.files

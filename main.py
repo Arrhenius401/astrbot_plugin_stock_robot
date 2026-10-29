@@ -44,8 +44,21 @@ from .waiting_messages import SessionEvent, generate_text, notification_loop
 MANAGED_RELEASE_TAG = "v0.3.0"
 
 
-async def _render_report(markdown: str, *, return_url: bool = False) -> str:
+async def _render_report(
+    markdown: str, *, return_url: bool = False, width: int = 800,
+) -> str:
     """使用 AstrBot 本地 Markdown 渲染，避免远程 T2I 对长报告返回非图片。"""
+    if width != 800:
+        # 本地策略接口固定 800px；黄金宽表直接复用底层渲染器。
+        from astrbot.core.utils.io import save_temp_img
+        from astrbot.core.utils.t2i.local_strategy import MarkdownRenderer
+
+        image = await MarkdownRenderer(font_size=25, width=width).render(markdown)
+        try:
+            return save_temp_img(image)
+        finally:
+            image.close()
+
     from astrbot.core import html_renderer
 
     return await html_renderer.render_t2i(

@@ -151,9 +151,10 @@ class ReportDelivery:
         # 等待原生渲染及文件读取完成后再结束停用。
         await asyncio.gather(*list(self._workers), return_exceptions=True)
 
-    async def _render(self, markdown: str) -> RenderedReport:
+    async def _render(self, markdown: str, kind: str = "stock") -> RenderedReport:
         async with self._render_gate:
-            worker = asyncio.create_task(self.renderer.render(markdown))
+            options = {"width": 1200} if kind == "gold" else {}
+            worker = asyncio.create_task(self.renderer.render(markdown, **options))
             self._workers.add(worker)
             try:
                 return await asyncio.shield(worker)
@@ -231,7 +232,7 @@ class ReportDelivery:
             try:
                 result["stage"] = "render"
                 image = await asyncio.wait_for(
-                    self._render(markdown),
+                    self._render(markdown, kind),
                     timeout=self.limits.render_timeout,
                 )
                 result.update(image=image, stage="image")

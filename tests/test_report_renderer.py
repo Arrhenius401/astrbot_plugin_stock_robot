@@ -26,9 +26,9 @@ async def test_native_call_preserves_markdown_and_cleans_image(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("size", [(800, 30624), (800, 40000)])
+@pytest.mark.parametrize("size", [(1200, 14619), (800, 30000)])
 async def test_long_report_within_pixel_budget(tmp_path, size):
-    # 覆盖用户黄金报告云端实际尺寸，以及 3200 万像素边界。
+    # 覆盖黄金报告 1200px 云端实际尺寸，以及原 2400 万像素边界。
     path = tmp_path / "native.png"
     Image.new("1", size).save(path)
 
@@ -41,14 +41,15 @@ async def test_long_report_within_pixel_budget(tmp_path, size):
 
 
 @pytest.mark.asyncio
-async def test_pixel_budget_and_invalid_output_cleanup(tmp_path):
+@pytest.mark.parametrize("size", [(800, 30624), (800, 30001)])
+async def test_pixel_budget_and_invalid_output_cleanup(tmp_path, size):
     path = tmp_path / "native.png"
 
     async def native(*args, **kwargs):
         return str(path)
 
     renderer = ReportRenderer(native)
-    Image.new("1", (800, 40001)).save(path)
+    Image.new("1", size).save(path)
     with pytest.raises(ReportTooLarge):
         await renderer.render("原文")
     assert not path.exists()
@@ -86,4 +87,18 @@ async def test_cancelled_read_finishes_cleanup_before_return(tmp_path, monkeypat
     finish.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_gold_width_reaches_native_renderer(tmp_path):
+    path = tmp_path / "gold.png"
+    Image.new("1", (1200, 100)).save(path)
+
+    async def native(markdown, *, return_url, width):
+        assert markdown == "黄金原文" and return_url is False and width == 1200
+        return str(path)
+
+    result = await ReportRenderer(native).render("黄金原文", width=1200)
+    assert result.width == 1200
     assert not path.exists()
