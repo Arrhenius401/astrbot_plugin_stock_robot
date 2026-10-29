@@ -26,6 +26,21 @@ async def test_native_call_preserves_markdown_and_cleans_image(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(800, 30624), (800, 40000)])
+async def test_long_report_within_pixel_budget(tmp_path, size):
+    # 覆盖用户黄金报告云端实际尺寸，以及 3200 万像素边界。
+    path = tmp_path / "native.png"
+    Image.new("1", size).save(path)
+
+    async def native(*args, **kwargs):
+        return str(path)
+
+    result = await ReportRenderer(native).render("黄金市场观察简报")
+    assert (result.width, result.height) == size
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
 async def test_pixel_budget_and_invalid_output_cleanup(tmp_path):
     path = tmp_path / "native.png"
 
@@ -33,7 +48,7 @@ async def test_pixel_budget_and_invalid_output_cleanup(tmp_path):
         return str(path)
 
     renderer = ReportRenderer(native)
-    Image.new("1", (5000, 5000)).save(path)
+    Image.new("1", (800, 40001)).save(path)
     with pytest.raises(ReportTooLarge):
         await renderer.render("原文")
     assert not path.exists()

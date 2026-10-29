@@ -49,8 +49,8 @@ class ReportRenderer:
 
         try:
             with Image.open(path) as image:
-                if image.width * image.height > 24_000_000:
-                    raise ReportTooLarge("原生图片超过 2400 万像素")
+                if image.width * image.height > 32_000_000:
+                    raise ReportTooLarge("原生图片超过 3200 万像素")
                 output = BytesIO()
                 image.save(output, format="PNG")
                 return RenderedReport(output.getvalue(), image.width, image.height)
