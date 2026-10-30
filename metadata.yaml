@@ -3,7 +3,7 @@ display_name: 股票分析助手
 short_desc: 在 AstrBot 聊天中分析 A 股/港股个股、A 股指数与黄金市场观察，获取评分与研报图片。
 desc: |
   发送股票、指数或黄金请求，即可获取 A 股/港股个股、A 股指数研报或黄金市场观察简报。报告包含五维综合评分、行业同期对比和 AI 综合解读（黄金简报为价格优先的市场观察），完整报告以图片发送到聊天中，方便阅读和分享。
-version: 1.2.1
+version: 1.2.2
 author: Arrhenius401
 repo: https://github.com/Arrhenius401/astrbot_plugin_stock_robot
 astrbot_version: ">=4.27.0"  # 开发与验证基线 4.27.0
