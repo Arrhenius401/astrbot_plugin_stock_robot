@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -12,7 +13,7 @@ from astrbot.api import logger
 from .bootstrap import redact
 
 DEFAULT_BASE_URL = "http://127.0.0.1:25618"
-DEFAULT_TIMEOUT_SECONDS = 100
+DEFAULT_TIMEOUT_SECONDS = 150
 TIMEOUT_MARGIN = 15
 MIN_EFFECTIVE_TIMEOUT = 10
 
@@ -26,6 +27,13 @@ class AnalyzeOutcome:
     ok: bool
     user_message: str = ""
     markdown: str = ""
+    ambiguous: bool = False
+
+
+@dataclass(frozen=True)
+class ReportRef:
+    id: str
+    generated_at: float
 
 
 def resolve_effective_timeout(config_timeout: int, tool_timeout: int | None) -> int:
@@ -39,7 +47,7 @@ def resolve_effective_timeout(config_timeout: int, tool_timeout: int | None) -> 
 
 def progress_message(symbol: str) -> str:
     """提示服务准备和分析正在进行。"""
-    return f"⏳ 正在准备服务并分析 {symbol}，请稍候。首次分析通常需要 30～90 秒。"
+    return f"⏳ 正在准备服务并分析 {symbol}，请稍候。首次分析通常需要 30～150 秒。"
 
 
 def public_error_detail(value: str) -> str:
@@ -160,6 +168,53 @@ class StockRobotClient:
             return None
         return str(report_id) if report_id else None
 
+    async def latest_report(
+        self, kind: ReportKind, query: str, effective_timeout: int
+    ) -> ReportRef | None:
+        """定位最新一条报告（报告库按时间倒序，取第一条）；失败返回 None。"""
+        try:
+            resp = await self._http.get(
+                f"{self._base_url}/api/v1/reports",
+                params={"type": kind, "query": query},
+                timeout=effective_timeout,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("报告库查询失败: %s", redact(str(exc)))
+            return None
+        if resp.status_code != 200:
+            logger.warning("报告库查询返回 HTTP %s", resp.status_code)
+            return None
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            logger.warning("报告库响应解析失败: %s", redact(str(exc)))
+            return None
+        if not isinstance(payload, dict):
+            logger.warning("报告库响应结构异常")
+            return None
+        reports = payload.get("reports")
+        if reports is None:
+            reports = []
+        if not isinstance(reports, list) or any(
+            not isinstance(item, dict) for item in reports
+        ):
+            logger.warning("报告库列表结构异常")
+            return None
+        if not reports:
+            logger.debug("报告库暂无 %s 的报告: %s", kind, query)
+            return None
+        report_id = reports[0].get("id")
+        if not isinstance(report_id, (str, int)) or isinstance(report_id, bool):
+            logger.warning("报告库报告标识无效")
+            return None
+        generated_at = reports[0].get("generated_at")
+        if (not report_id or isinstance(generated_at, bool)
+                or not isinstance(generated_at, (int, float))
+                or not math.isfinite(generated_at)):
+            logger.warning("报告库生成时间无效")
+            return None
+        return ReportRef(str(report_id), float(generated_at))
+
     async def download_report(
         self, report_id: str, effective_timeout: int
     ) -> str | None:
@@ -197,6 +252,7 @@ class StockRobotClient:
                 False,
                 f"⏱️ 分析超时（超过 {effective_timeout} 秒）。"
                 "首次分析需拉取数据较慢，可稍后重试或调大插件超时配置",
+                ambiguous=True,
             )
         except httpx.HTTPError as exc:
             logger.warning(

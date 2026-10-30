@@ -108,7 +108,7 @@ async def test_new_request_clears_waiting_queue_before_normal_analysis(plugin_ma
         plugin._pending.asked("group", record["id"], "继续吗？")
     plugin._launcher = SimpleNamespace(state="ready")
 
-    async def perform(*args):
+    async def perform(*args, **kwargs):
         assert plugin._pending.get("group") is None
 
     plugin._perform_analysis = perform
@@ -724,6 +724,32 @@ def test_resolve_effective_timeout(config_timeout, tool_timeout, expected):
     assert resolve_effective_timeout(config_timeout, tool_timeout) == expected
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({"agent_runner": {"config": {"misc": {"tool_call_timeout": 180}}}}, 150),
+        ({"provider_settings": {"tool_call_timeout": 120}}, 105),
+        ({}, 150),
+        (
+            {
+                "provider_settings": {},
+                "agent_runner": {"config": {"misc": {"tool_call_timeout": 20}}},
+            },
+            10,
+        ),
+    ],
+)
+async def test_effective_timeout_reads_astrbot_config(plugin_main, config, expected):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {"timeout_seconds": 150})
+    plugin.context = SimpleNamespace(get_config=lambda umo=None: config)
+    event = SimpleNamespace(unified_msg_origin="test")
+    try:
+        assert plugin._resolve_effective_timeout(event) == expected
+    finally:
+        await plugin._client.aclose()
+
+
 def test_progress_message_describes_preparation_and_analysis():
     text = progress_message("600519")
     assert "600519" in text
@@ -1047,5 +1073,127 @@ async def test_confirmed_gold_webchat_completes_after_request_closes(plugin_main
         assert bridge_facts[0]["kind"] == "gold" and bridge_facts[0]["symbol"] == "GOLD"
         assert plugin._client.analyze_gold.await_count == 1
         assert not plugin._pending.accepted() and plugin._delivery._reserved == 0
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error,ambiguous", [(httpx.ReadTimeout("slow"), True), (httpx.ConnectError("offline"), False)])
+async def test_analysis_ambiguity(error, ambiguous):
+    client = StockRobotClient(BASE)
+    client._http.post = AsyncMock(side_effect=error)
+    try:
+        assert (await client.analyze_stock("600900", 150)).ambiguous is ambiguous
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reports,valid", [
+    ([{"id": "r", "generated_at": 123.5}], True),
+    ([{"id": "r"}], False),
+    *[([{"id": "r", "generated_at": value}], False) for value in [None, True, "123", float("inf"), float("nan")]],
+    ([{"id": True, "generated_at": 123}], False),
+    (None, False), ({}, False), ([None], False), ([], False),
+])
+async def test_latest_report_timestamp(reports, valid):
+    client = StockRobotClient(BASE)
+    client._http.get = AsyncMock(return_value=SimpleNamespace(status_code=200, json=lambda: {"reports": reports}))
+    try:
+        ref = await client.latest_report("stock", "600900", 15)
+        if valid:
+            assert ref.id == "r" and ref.generated_at == 123.5
+        else:
+            assert ref is None
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_analysis_background(plugin_main):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    event = SimpleNamespace(send=AsyncMock(), plain_result=lambda x: x, unified_msg_origin="test")
+    plugin._client.analyze_stock = AsyncMock(return_value=SimpleNamespace(ok=False, ambiguous=True))
+    try:
+        with pytest.raises(plugin_main.AnalysisStillRunning):
+            await plugin._perform_analysis(event, "stock", "600900", [], asyncio.get_running_loop().time()+10, started_at=123)
+        event.send.assert_awaited_once_with(progress_message("600900"))
+        plugin._perform_analysis = AsyncMock(
+            side_effect=plugin_main.AnalysisStillRunning(123)
+        )
+        scheduled = []
+        plugin._schedule_late_report = lambda *args: scheduled.append(args)
+        event.send.reset_mock()
+        note = []
+        await plugin._run_analysis(event, "stock", "600900", note)
+        assert len(scheduled) == 1
+        event.send.assert_awaited_once_with(
+            "⏱️ 分析超过等待时间，已转入后台继续；完成后会自动补发报告。"
+        )
+        assert "后台继续" in note[-1]
+        assert plugin._delivery._reserved == 0
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_analysis_schedules_late_report(plugin_main):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    event = SimpleNamespace(
+        send=AsyncMock(), plain_result=lambda value: value, unified_msg_origin="test"
+    )
+    scheduled = []
+    plugin._perform_analysis = AsyncMock(side_effect=asyncio.CancelledError)
+    plugin._schedule_late_report = lambda *args: scheduled.append(args)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await plugin._run_analysis(event, "stock", "600900", [])
+        assert len(scheduled) == 1
+        assert plugin._delivery._reserved == 0
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_late_recovery_reserve_failure_notifies(plugin_main):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    event = SimpleNamespace(send=AsyncMock(), plain_result=lambda value: value)
+    plugin._delivery.reserve = lambda: False
+    try:
+        await plugin._recover_late_report(event, "stock", "600900", 100)
+        assert "后台补发未能启动" in event.send.await_args.args[0]
+        assert plugin._delivery._reserved == 0
+    finally:
+        await plugin._client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["success", "old", "zero"])
+async def test_late_recovery(plugin_main, monkeypatch, mode):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    event = SimpleNamespace(send=AsyncMock(), plain_result=lambda x: x)
+    monkeypatch.setattr(
+        plugin_main, "LATE_REPORT_WAIT_SECONDS", 0 if mode == "zero" else .02
+    )
+    monkeypatch.setattr(plugin_main, "LATE_REPORT_POLL_SECONDS", .001)
+    plugin._client.latest_report = AsyncMock(
+        return_value=SimpleNamespace(
+            id="r", generated_at=100 if mode == "success" else 1
+        )
+    )
+    plugin._client.download_report = AsyncMock(return_value="# report")
+    submitted = []
+    plugin._delivery.submit = lambda *args: submitted.append(args)
+    try:
+        await plugin._recover_late_report(event, "stock", "600900", 100)
+        if mode == "success":
+            assert submitted[0][1:] == ("# report", "600900", "stock")
+            assert plugin._delivery._reserved == 1
+            plugin._delivery.release()
+            assert "后台分析已完成" in event.send.await_args.args[0]
+        else:
+            assert not submitted and plugin._delivery._reserved == 0
+            plugin._client.download_report.assert_not_awaited()
+            assert "仍未生成报告" in event.send.await_args.args[0]
     finally:
         await plugin._client.aclose()

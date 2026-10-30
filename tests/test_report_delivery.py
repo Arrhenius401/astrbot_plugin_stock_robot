@@ -552,3 +552,34 @@ async def test_report_kind_selects_width(tmp_path, kind, expected):
     await asyncio.gather(*list(service._tasks))
     assert len(event.messages) == 1 and event.messages[0].kind == "image"
     assert not event.files
+
+
+def test_image_timeout_default():
+    assert DeliveryLimits().image_timeout == 120
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["large", "small", "invalid"])
+async def test_prepared_image_bytes(tmp_path, caplog, mode):
+    import io
+    import random
+
+    from PIL import Image
+
+    output = io.BytesIO()
+    Image.frombytes(
+        "RGB", (256, 256), random.Random(42).randbytes(256 * 256 * 3)
+    ).save(output, "PNG")
+    original = b"invalid PNG" if mode == "invalid" else output.getvalue()
+    limits = {} if mode == "small" else {"image_compress_bytes": 1, "image_compress_height": 0}
+    service = manager(tmp_path, **limits)
+    event = Event()
+    await service._send_image(event, RenderedReport(original, 256, 256))
+    sent = event.messages[0].data
+    if mode == "large":
+        assert sent.startswith(b"\xff\xd8\xff")
+        assert len(sent) < len(original)
+    else:
+        assert sent == original
+    if mode == "invalid":
+        assert "UnidentifiedImageError" in caplog.text

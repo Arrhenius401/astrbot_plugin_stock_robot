@@ -12,8 +12,8 @@
   "timeout_seconds": {
     "description": "单次分析最长等待时间（秒）",
     "type": "int",
-    "default": 100,
-    "hint": "等待分析服务返回结果的最长时间。实际等待还受机器人平台的工具时限限制，调大此值不一定能延长等待。修改后重载插件生效。"
+    "default": 150,
+    "hint": "默认等待分析结果 150 秒。AstrBot 的 agent_runner.config.misc.tool_call_timeout 建议至少 180 秒（旧版为 provider_settings.tool_call_timeout）；插件配置与工具时限扣除 15 秒余量后取较小值，流程另预留 5 秒收尾。股票/指数等待超时后会转入后台查询报告库最多 120 秒，找到本次请求开始后生成的报告便自动补发。修改后重载插件生效。"
   },
   "startup_timeout_seconds": {
     "description": "服务就绪最长等待时间（秒）", "type": "int", "default": 60,

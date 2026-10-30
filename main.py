@@ -44,6 +44,17 @@ from .waiting_messages import SessionEvent, generate_text, notification_loop
 MANAGED_RELEASE_TAG = "v0.3.1"
 
 
+LATE_REPORT_WAIT_SECONDS = 120
+LATE_REPORT_POLL_SECONDS = 5
+LATE_REPORT_CLOCK_TOLERANCE = 2.0
+
+
+class AnalysisStillRunning(Exception):
+    def __init__(self, started_at):
+        super().__init__("analysis may still be running")
+        self.started_at = started_at
+
+
 async def _render_report(
     markdown: str, *, return_url: bool = False, width: int = 800,
 ) -> str:
@@ -148,6 +159,8 @@ class StockRobotPlugin(Star):
         )
         self._analysis_locks: dict[tuple[str, str], tuple[asyncio.Lock, int]] = {}
         self._analysis_tasks: set[asyncio.Task] = set()
+        self._late_tasks: dict[tuple[str, str, str], asyncio.Task] = {}
+        self._timeout_cap_warned = False
         self._stopping = False
         self._timeout_seconds = int(
             self.config.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS
@@ -459,16 +472,43 @@ class StockRobotPlugin(Star):
         tool_timeout: int | None = None
         try:
             cfg = self.context.get_config(umo=event.unified_msg_origin)
+            raw = None
             provider_settings = (
                 cfg.get("provider_settings", {}) if hasattr(cfg, "get") else {}
             )
-            raw = provider_settings.get("tool_call_timeout")
+            if isinstance(provider_settings, dict):
+                raw = provider_settings.get("tool_call_timeout")
+            if raw is None:
+                agent_runner = (
+                    cfg.get("agent_runner", {}) if hasattr(cfg, "get") else {}
+                )
+                config = (
+                    agent_runner.get("config", {})
+                    if isinstance(agent_runner, dict)
+                    else {}
+                )
+                misc = config.get("misc", {}) if isinstance(config, dict) else {}
+                if isinstance(misc, dict):
+                    raw = misc.get("tool_call_timeout")
             tool_timeout = int(raw) if raw is not None else None
         except Exception:  # noqa: BLE001 — 配置读取失败按插件配置超时处理
             logger.warning(
                 "读取 AstrBot tool_call_timeout 失败，使用插件配置超时", exc_info=True
             )
-        return resolve_effective_timeout(self._timeout_seconds, tool_timeout)
+        effective = resolve_effective_timeout(self._timeout_seconds, tool_timeout)
+        if (
+            tool_timeout is not None
+            and effective < self._timeout_seconds
+            and not self._timeout_cap_warned
+        ):
+            self._timeout_cap_warned = True
+            logger.warning(
+                "AstrBot 工具时限 %s 秒低于插件等待 %s 秒，实际分析等待缩短为 %s 秒",
+                tool_timeout,
+                self._timeout_seconds,
+                effective,
+            )
+        return effective
 
     async def _run_analysis(
         self,
@@ -517,14 +557,27 @@ class StockRobotPlugin(Star):
         task = asyncio.current_task()
         if task is not None and not from_queue:
             self._analysis_tasks.add(task)
+        started_at = time.time()
+        logger.info(
+            "开始分析: kind=%s symbol=%s effective_timeout=%s",
+            kind,
+            symbol,
+            effective_timeout,
+        )
         try:
             async with asyncio.timeout(max(0, effective_timeout - 5)):
                 # 同一标的的分析与取报告互斥，避免取到另一次调用的“最新报告”。
                 async with lock:
                     markdown = await self._perform_analysis(
-                        event, kind, symbol, note, deadline
+                        event, kind, symbol, note, deadline, started_at=started_at
                     )
             if markdown is not None:
+                logger.info(
+                    "分析完成: kind=%s symbol=%s elapsed=%.2f",
+                    kind,
+                    symbol,
+                    time.time() - started_at,
+                )
                 if from_queue:
                     if step is not None:
                         step.update(state="report_ready", markdown=markdown)
@@ -538,18 +591,37 @@ class StockRobotPlugin(Star):
                     "报告已生成，正在后台发送。只回一句简短确认，不要声称已送达，"
                     "不要复述报告内容，不要再调用工具。"
                 )
-        except TimeoutError:
-            await asyncio.wait_for(
-                event.send(
-                    event.plain_result(
-                        "❌ 本次调用时间已耗尽，请稍后重试；后台准备任务会继续。"
-                    )
-                ),
-                timeout=5,
-            )
-            note.append(
-                "调用时间已耗尽，原因已发给用户。只回简短确认，不要再调用工具。"
-            )
+        except asyncio.CancelledError:
+            if not self._stopping and kind in {"stock", "index"}:
+                self._cleanup_uncertain = True
+                self._schedule_late_report(event, kind, symbol, started_at)
+            raise
+        except (AnalysisStillRunning, TimeoutError):
+            self._cleanup_uncertain = True
+            if kind in {"stock", "index"}:
+                await self._late_notice(
+                    event,
+                    "⏱️ 分析超过等待时间，已转入后台继续；完成后会自动补发报告。",
+                )
+                self._schedule_late_report(event, kind, symbol, started_at)
+                note.append(
+                    "等待超时，分析可能仍在后台继续；报告完成后会自动补发。"
+                    "只回简短确认，不要重新调用工具。"
+                )
+                logger.warning(
+                    "分析等待超时，转入后台补发: kind=%s symbol=%s elapsed=%.2f",
+                    kind,
+                    symbol,
+                    time.time() - started_at,
+                )
+            else:
+                await self._late_notice(
+                    event,
+                    "❌ 本次调用时间已耗尽，请稍后重试；后台准备任务会继续。",
+                )
+                note.append(
+                    "调用时间已耗尽，原因已发给用户。只回简短确认，不要再调用工具。"
+                )
         finally:
             if not submitted:
                 self._delivery.release()
@@ -568,6 +640,7 @@ class StockRobotPlugin(Star):
         symbol: str,
         note: list[str],
         deadline: float,
+        *, started_at: float | None = None,
     ) -> str | None:
         """执行分析流程：进度 → 分析 → 报告取回；成功返回完整原文。
 
@@ -619,6 +692,12 @@ class StockRobotPlugin(Star):
             raise
         if not outcome.ok:
             self._cleanup_uncertain = True
+            if (
+                getattr(outcome, "ambiguous", False)
+                and started_at is not None
+                and kind in {"stock", "index"}
+            ):
+                raise AnalysisStillRunning(started_at)
             await event.send(event.plain_result(outcome.user_message))
             note.append(
                 "分析失败，原因已直接发给用户。只回一句简短确认，不要编造分析内容，不要再调用工具。"
@@ -646,3 +725,104 @@ class StockRobotPlugin(Star):
             )
             return
         return markdown
+
+
+    async def _late_notice(self, event, message):
+        try:
+            await asyncio.wait_for(event.send(event.plain_result(message)), timeout=5)
+        except Exception as error:  # noqa: BLE001 — 消息平台边界，补发仍继续
+            logger.warning("后台补发提示发送失败: %s", type(error).__name__)
+
+    def _schedule_late_report(self, event, kind, symbol, started_at):
+        if self._stopping or kind not in {"stock", "index"}:
+            return
+        key = (str(event.unified_msg_origin), kind, symbol)
+        existing = self._late_tasks.get(key)
+        if existing is not None and not existing.done():
+            return
+        self._late_tasks.pop(key, None)
+        if getattr(event, "get_platform_name", lambda: "")() == "webchat":
+            event = SessionEvent(self.context, event.unified_msg_origin)
+        task = asyncio.create_task(
+            self._recover_late_report(event, kind, symbol, started_at),
+            name=f"stock-late-report-{symbol}",
+        )
+        self._late_tasks[key] = task
+        self._analysis_tasks.add(task)
+
+        def finished(done):
+            self._late_tasks.pop(key, None)
+            self._analysis_tasks.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                logger.warning("后台补发任务异常: %s", type(done.exception()).__name__)
+
+        task.add_done_callback(finished)
+
+    async def _recover_late_report(self, event, kind, symbol, started_at):
+        if not self._delivery.reserve():
+            logger.warning(
+                "报告任务较多，后台补发暂缓: kind=%s symbol=%s", kind, symbol
+            )
+            await self._late_notice(
+                event, "❌ 报告任务较多，后台补发未能启动，请稍后重试。"
+            )
+            return
+        transferred = False
+        last_id = None
+        deadline = asyncio.get_running_loop().time() + LATE_REPORT_WAIT_SECONDS
+        try:
+            while asyncio.get_running_loop().time() < deadline:
+                ref = await self._client.latest_report(kind, symbol, 15)
+                if ref is not None:
+                    last_id = ref.id
+                    if ref.generated_at >= started_at - LATE_REPORT_CLOCK_TOLERANCE:
+                        markdown = await self._client.download_report(ref.id, 30)
+                        if markdown and markdown.strip():
+                            await self._late_notice(
+                                event, "✅ 后台分析已完成，正在补发报告。"
+                            )
+                            try:
+                                self._delivery.submit(
+                                    event, markdown, symbol, kind
+                                )
+                            except Exception as error:  # noqa: BLE001 — 交付失败保留诊断
+                                logger.warning(
+                                    "后台补发提交失败: %s", type(error).__name__
+                                )
+                                await self._late_notice(
+                                    event, "❌ 后台报告发送失败，请稍后重试。"
+                                )
+                                return
+                            transferred = True
+                            logger.info(
+                                "后台补发报告已提交: kind=%s symbol=%s "
+                                "report_id=%s elapsed=%.2f",
+                                kind,
+                                symbol,
+                                ref.id,
+                                time.time() - started_at,
+                            )
+                            return
+                await asyncio.sleep(
+                    max(
+                        0,
+                        min(
+                            LATE_REPORT_POLL_SECONDS,
+                            deadline - asyncio.get_running_loop().time(),
+                        ),
+                    )
+                )
+            await self._late_notice(
+                event, "❌ 后台分析仍未生成报告，请稍后重试。"
+            )
+            logger.warning(
+                "后台补发未找到报告: kind=%s symbol=%s elapsed=%.2f "
+                "last_report_id=%s",
+                kind,
+                symbol,
+                time.time() - started_at,
+                last_id,
+            )
+        finally:
+            if not transferred:
+                self._delivery.release()

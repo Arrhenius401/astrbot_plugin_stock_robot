@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import re
 import tempfile
 import uuid
@@ -27,9 +28,12 @@ CHUNK_SIZE = 64 * 1024
 class DeliveryLimits:
     max_tasks: int = 8
     render_timeout: float = 60
-    image_timeout: float = 60
+    image_timeout: float = 120
     file_timeout: float = 300
     image_interval: float = 1
+    image_compress_bytes: int = 3 * 1024 * 1024
+    image_compress_height: int = 10000
+    image_jpeg_quality: int = 92
 
 
 @dataclass
@@ -272,10 +276,43 @@ class ReportDelivery:
                     "❌ 报告已生成，但图片和文件都未能发送，请检查插件日志或稍后重试。",
                 )
 
+    def _prepare_image(self, image: RenderedReport) -> bytes:
+        if (
+            len(image.png) <= self.limits.image_compress_bytes
+            and image.height <= self.limits.image_compress_height
+        ):
+            return image.png
+        try:
+            from PIL import Image
+
+            with Image.open(io.BytesIO(image.png)) as source:
+                converted = (
+                    source.convert("RGB")
+                    if source.mode not in {"RGB", "L"}
+                    else source
+                )
+                try:
+                    output = io.BytesIO()
+                    converted.save(
+                        output,
+                        "JPEG",
+                        quality=self.limits.image_jpeg_quality,
+                        optimize=True,
+                    )
+                    data = output.getvalue()
+                finally:
+                    if converted is not source:
+                        converted.close()
+            return data if len(data) < len(image.png) else image.png
+        except Exception as error:  # noqa: BLE001 — 压缩失败仍发送原图
+            logger.warning("报告长图压缩失败: %s", type(error).__name__)
+            return image.png
+
     async def _send_image(self, event: Any, image: RenderedReport) -> None:
         from astrbot.api.message_components import Image
 
         async with self._image_gate:
+            prepared = await self._file_io(self._prepare_image, image)
             delay = self.limits.image_interval - (
                 asyncio.get_running_loop().time() - self._last_image
             )
@@ -283,8 +320,16 @@ class ReportDelivery:
                 await asyncio.sleep(delay)
             try:
                 await asyncio.wait_for(
-                    self._send(event, event.chain_result([Image.fromBytes(image.png)])),
+                    self._send(
+                        event, event.chain_result([Image.fromBytes(prepared)])
+                    ),
                     timeout=self.limits.image_timeout,
+                )
+                logger.info(
+                    "报告长图已提交: image_bytes=%s sent_bytes=%s jpeg=%s",
+                    len(image.png),
+                    len(prepared),
+                    prepared != image.png,
                 )
             finally:
                 self._last_image = asyncio.get_running_loop().time()
