@@ -538,12 +538,12 @@ async def test_gold_webchat_delivery_retains_report_copy(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind, expected", [("gold", {"width": 1200}), ("stock", {}), ("index", {"width": 1200})])
+@pytest.mark.parametrize("kind, expected", [("gold", {"width": 1200}), ("stock", {"width": 1200}), ("index", {"width": 1200})])
 async def test_report_kind_selects_width(tmp_path, kind, expected):
     class WidthRenderer:
         async def render(self, markdown, **kwargs):
             assert markdown == "原文" and kwargs == expected
-            return RenderedReport(b"image", 1200 if kind in {"gold", "index"} else 800, 100)
+            return RenderedReport(b"image", 1200, 100)
 
     event = Event()
     service = manager(tmp_path, WidthRenderer())
