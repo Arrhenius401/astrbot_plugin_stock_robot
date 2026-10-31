@@ -226,7 +226,7 @@ class ServiceLauncher:
             try:
                 await asyncio.to_thread(self._settings_sync, self.instance)
             except Exception as exc:  # noqa: BLE001 — 同步失败不阻止服务启动
-                logger.warning("报告清理设置同步失败：%s", type(exc).__name__)
+                logger.warning("服务设置同步失败：%s", type(exc).__name__)
         return StepResult(True)
 
     async def _prepare(self, allow_install: bool) -> ReadyOutcome:

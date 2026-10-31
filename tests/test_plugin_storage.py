@@ -87,6 +87,9 @@ async def test_plugin_entry_creates_retained_report_and_stops_cleanly(plugin_mod
         async def analyze_index(self, *args):
             return SimpleNamespace(ok=True)
 
+        async def fetch_config(self, timeout=3):
+            return None
+
         async def latest_report_id(self, *args):
             return "isolated"
 
@@ -135,6 +138,9 @@ async def test_uncertain_analysis_keeps_delivery_released(plugin_module, failure
                 raise asyncio.CancelledError()
             return SimpleNamespace(ok=False, user_message="failed")
 
+        async def fetch_config(self, timeout=3):
+            return None
+
         async def aclose(self):
             pass
 
@@ -147,6 +153,94 @@ async def test_uncertain_analysis_keeps_delivery_released(plugin_module, failure
         pass
     assert plugin._delivery._reserved == 0
     await plugin.terminate()
+
+
+@pytest.mark.asyncio
+async def test_analysis_mode_mismatch_warns_only_once(plugin_module):
+    plugin = plugin_module.StockRobotPlugin(
+        SimpleNamespace(), {"extra_analysis_enabled": True}
+    )
+
+    class Client:
+        calls = 0
+
+        def __init__(self):
+            self.payload = {"config": {"analysis": {"extra_enabled": False}}}
+
+        async def fetch_config(self, timeout=3):
+            Client.calls += 1
+            return self.payload
+
+    plugin._client = Client()
+    plugin._owns_service = True
+    event = Event()
+
+    await plugin._verify_analysis_mode(event, "stock")
+    await plugin._verify_analysis_mode(event, "index")
+
+    assert Client.calls == 1
+    assert plugin._mode_checked
+    assert len(event.messages) == 1
+    assert "额外分析开关未生效" in event.messages[0]
+    assert "关闭" in event.messages[0]
+
+
+@pytest.mark.asyncio
+async def test_unsupported_service_warns_and_matching_mode_is_silent(plugin_module):
+    plugin = plugin_module.StockRobotPlugin(
+        SimpleNamespace(), {"extra_analysis_enabled": True}
+    )
+
+    class Client:
+        def __init__(self):
+            self.payload = {"config": {}}
+
+        async def fetch_config(self, timeout=3):
+            return self.payload
+
+    plugin._client = Client()
+    event = Event()
+    await plugin._verify_analysis_mode(event, "stock")
+    assert len(event.messages) == 1
+    assert "版本不支持" in event.messages[0]
+
+    plugin = plugin_module.StockRobotPlugin(
+        SimpleNamespace(), {"extra_analysis_enabled": True}
+    )
+
+    class Matching:
+        async def fetch_config(self, timeout=3):
+            return {"config": {"analysis": {"extra_enabled": True}}}
+
+    plugin._client = Matching()
+    event = Event()
+    await plugin._verify_analysis_mode(event, "index")
+    assert event.messages == []
+
+
+@pytest.mark.asyncio
+async def test_analysis_mode_check_is_skipped_for_gold_and_unreadable_config(
+    plugin_module,
+):
+    plugin = plugin_module.StockRobotPlugin(SimpleNamespace(), {})
+
+    class Client:
+        async def fetch_config(self, timeout=3):
+            raise AssertionError("黄金不应读取分析模式")
+
+    plugin._client = Client()
+    event = Event()
+    await plugin._verify_analysis_mode(event, "gold")
+    assert not plugin._mode_checked
+
+    class Unreadable:
+        async def fetch_config(self, timeout=3):
+            return None
+
+    plugin._client = Unreadable()
+    await plugin._verify_analysis_mode(event, "stock")
+    assert not plugin._mode_checked
+    assert event.messages == []
 
 
 def artifact(directory, suffix="md"):

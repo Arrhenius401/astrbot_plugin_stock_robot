@@ -711,6 +711,46 @@ def test_download_report_404_returns_none():
 
 
 @pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (httpx.Response(200, json={"config": {"analysis": {"extra_enabled": True}}}), True),
+        (httpx.Response(200, text="不是 JSON"), None),
+        (httpx.Response(500, json={"detail": "boom"}), None),
+    ],
+)
+@respx.mock
+def test_fetch_config_returns_public_payload_or_none(response, expected):
+    respx.get(f"{BASE}/api/v1/config").mock(return_value=response)
+
+    async def call():
+        client = StockRobotClient(BASE, 100)
+        try:
+            return await client.fetch_config()
+        finally:
+            await client.aclose()
+
+    payload = run(call())
+    if expected is None:
+        assert payload is None
+    else:
+        assert payload["config"]["analysis"]["extra_enabled"] is True
+
+
+@respx.mock
+def test_fetch_config_swallows_network_error():
+    respx.get(f"{BASE}/api/v1/config").mock(side_effect=httpx.ConnectError("down"))
+
+    async def call():
+        client = StockRobotClient(BASE, 100)
+        try:
+            return await client.fetch_config()
+        finally:
+            await client.aclose()
+
+    assert run(call()) is None
+
+
+@pytest.mark.parametrize(
     ("config_timeout", "tool_timeout", "expected"),
     [
         (100, 120, 100),  # 配置值较小 → 取配置值

@@ -38,7 +38,7 @@ from .plugin_settings import migrate_port, resolve_legacy_extras
 from .report_delivery import ReportDelivery
 from .report_renderer import ReportRenderer
 from .report_storage import ReportStorage
-from .retention_sync import sync_cleanup_setting
+from .service_settings import SyncOutcome, sync_service_settings
 from .waiting_messages import SessionEvent, generate_text, notification_loop
 
 # 每个插件版本只自动安装已完成兼容验收的主仓正式版，不追随 latest。
@@ -173,6 +173,10 @@ class StockRobotPlugin(Star):
         self._waiting_task: asyncio.Task | None = None
         self._batch_tasks: dict[str, asyncio.Task] = {}
         self._data_dir = data_dir
+        self._owns_service = False
+        self._settings_outcomes: tuple[SyncOutcome, ...] = ()
+        self._mode_checked = False
+        self._mode_warning_sent = False
 
     async def initialize(self):
         """准备任务由 launcher 持有，插件加载立即返回。"""
@@ -203,7 +207,7 @@ class StockRobotPlugin(Star):
             progress=progress,
             llm_loader=partial(read_llm_config, self.context),
             managed_release_tag=MANAGED_RELEASE_TAG,
-            settings_sync=partial(sync_cleanup_setting, self.config, data_dir),
+            settings_sync=partial(self._sync_service_settings, data_dir),
         )
         self._launcher.start_background()
         await self._storage.start()
@@ -212,6 +216,57 @@ class StockRobotPlugin(Star):
             lambda: self._launcher is not None and getattr(self._launcher, "state", "idle") == "ready",
             logger, worker_lock=self._waiting_lock, recover=self._recover_batches,
         ))
+
+    def _sync_service_settings(self, data_dir: Path, instance: Path):
+        """服务启动前同步插件开关；只有自建服务会走到这里。"""
+        outcomes = sync_service_settings(self.config, data_dir, instance)
+        self._owns_service = True
+        self._settings_outcomes = tuple(outcomes)
+        for outcome in outcomes:
+            if outcome.action in {"write_failed", "adopt_failed", "invalid", "locked", "missing"}:
+                logger.warning(
+                    "服务设置未同步（%s）：%s", outcome.setting, outcome.warning
+                )
+        return outcomes
+
+    async def _verify_analysis_mode(self, event: AstrMessageEvent, kind: str):
+        """服务就绪后核对额外分析开关，避免界面显示生效但实际未生效。"""
+        if kind not in {"stock", "index"} or self._mode_checked:
+            return
+        payload = await self._client.fetch_config(timeout=2)
+        if payload is None:
+            logger.debug("额外分析开关未校验：无法读取分析服务配置")
+            return
+        self._mode_checked = True
+        config = payload.get("config")
+        analysis = config.get("analysis") if isinstance(config, dict) else None
+        if not isinstance(analysis, dict) or not isinstance(analysis.get("extra_enabled"), bool):
+            await self._notify_mode(
+                event,
+                "⚠️ 额外分析开关未生效：当前分析服务版本不支持该设置，请先升级内置服务。",
+            )
+            return
+        actual = analysis["extra_enabled"]
+        desired = self.config.get("extra_analysis_enabled", False) is True
+        if actual == desired:
+            return
+        owner = "本插件自建服务" if self._owns_service else "外部或其他实例管理的服务"
+        await self._notify_mode(
+            event,
+            f"⚠️ 额外分析开关未生效：当前{owner}为{'开启' if actual else '关闭'}，"
+            f"与本插件设置（{'开启' if desired else '关闭'}）不一致，请在服务 Web 配置页确认。",
+        )
+
+    async def _notify_mode(self, event: AstrMessageEvent, message: str):
+        if self._mode_warning_sent:
+            return
+        self._mode_warning_sent = True
+        logger.warning("%s", message)
+        try:
+            async with asyncio.timeout(5):
+                await event.send(event.plain_result(message))
+        except Exception as error:  # noqa: BLE001 — 提示发送失败不阻断分析
+            logger.warning("额外分析提示发送失败：%s", type(error).__name__)
 
     async def terminate(self):
         """先回收任务和自建服务，HTTP 客户端始终关闭。"""
@@ -669,6 +724,8 @@ class StockRobotPlugin(Star):
                     "服务未就绪，原因已发给用户。只回简短确认，不要再调用工具。"
                 )
                 return
+            if deadline - asyncio.get_running_loop().time() > 10:
+                await self._verify_analysis_mode(event, kind)
         effective_timeout = remaining()
 
         if kind == "stock":

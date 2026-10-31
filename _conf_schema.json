@@ -1,31 +1,35 @@
 {
+  "extra_analysis_enabled": {
+    "description": "额外分析", "type": "bool", "default": false,
+    "hint": "为个股和指数增加规则判断及 AI 解读；个股另提供评分与模型信号。默认关闭。"
+  },
   "cleanup_previous_reports": {
     "description": "清理历史原始报告", "type": "bool", "default": true,
-    "hint": "由内置分析服务执行清理：删除超过 7 天的个股、指数和黄金研报及其结构快照，删除后无法恢复；保留期固定为 7 天。本项与主仓 Web 配置页的清理开关保持同步，修改后重载插件生效。"
+    "hint": "删除分析服务中超过 7 天的个股、指数和黄金报告，删除后不可恢复。修改后重载插件生效。"
   },
   "service_port": {
     "description": "本机分析服务端口",
     "type": "int",
     "default": 25618,
-    "hint": "通常无需修改。端口被其他程序占用时可更换，范围为 1～65535；分析服务仅在本机运行。修改后重载插件生效。"
+    "hint": "分析服务仅在本机运行，通常无需修改；端口冲突时改为 1～65535 的空闲端口。修改后重载插件生效。"
   },
   "timeout_seconds": {
     "description": "单次分析最长等待时间（秒）",
     "type": "int",
     "default": 150,
-    "hint": "默认等待分析结果 150 秒。AstrBot 的 agent_runner.config.misc.tool_call_timeout 建议至少 180 秒（旧版为 provider_settings.tool_call_timeout）；插件配置与工具时限扣除 15 秒余量后取较小值，流程另预留 5 秒收尾。股票/指数等待超时后会转入后台查询报告库最多 120 秒，找到本次请求开始后生成的报告便自动补发。修改后重载插件生效。"
+    "hint": "单次分析最多等待的时间；AstrBot 工具超时建议至少 180 秒。修改后重载插件生效。"
   },
   "startup_timeout_seconds": {
     "description": "服务就绪最长等待时间（秒）", "type": "int", "default": 60,
-    "hint": "分析服务尚未就绪时，本次请求最多等待多久。等待结束后，后台安装仍会继续；实际等待还受机器人平台时限限制。修改后重载插件生效。"
+    "hint": "服务未就绪时本次请求最多等待的时间；超时后后台继续准备。修改后重载插件生效。"
   },
   "install_timeout_seconds": {
     "description": "后台安装最长用时（秒）", "type": "int", "default": 1800,
-    "hint": "默认 30 分钟，包括下载程序、安装依赖和换源重试。超时后停止本次安装，保留可复用缓存；网络慢时可适当调大。修改后重载插件生效。"
+    "hint": "下载程序、安装依赖和换源重试的总时限；网络慢时可调大。修改后重载插件生效。"
   },
   "package_index_url": {
     "description": "Python 安装包下载源（选填）", "type": "string", "default": "",
-    "hint": "通常无需填写，不影响股票数据来源。留空先用清华源，失败后尝试安装工具原有设置；填写后先用该源，失败再尝试清华源一次，同源不重复。地址示例：https://pypi.tuna.tsinghua.edu.cn/simple 。修改后重载插件生效；已安装成功的服务不会因此重装。"
+    "hint": "选填。留空先用清华源，失败后尝试安装工具原有设置；也可填写自定义 pip 源，例如 https://pypi.tuna.tsinghua.edu.cn/simple 。修改后重载插件生效。"
   },
   "base_url": {
     "description": "旧地址迁移信息", "type": "string", "default": "", "invisible": true

@@ -1,4 +1,4 @@
-"""六项配置及旧版迁移的确定性回归。"""
+"""七项配置及旧版迁移的确定性回归。"""
 
 import importlib
 import json
@@ -14,8 +14,14 @@ def settings():
 def test_schema_visible_fields_and_plain_labels():
     schema = json.loads((Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text("utf-8"))
     visible = {key: value for key, value in schema.items() if not value.get("invisible")}
-    assert list(visible) == ["cleanup_previous_reports", "service_port", "timeout_seconds",
-                             "startup_timeout_seconds", "install_timeout_seconds", "package_index_url"]
+    assert list(visible) == ["extra_analysis_enabled", "cleanup_previous_reports", "service_port",
+                             "timeout_seconds", "startup_timeout_seconds",
+                             "install_timeout_seconds", "package_index_url"]
+    assert visible["extra_analysis_enabled"]["description"] == "额外分析"
+    assert visible["extra_analysis_enabled"]["default"] is False
+    assert visible["extra_analysis_enabled"]["hint"] == (
+        "为个股和指数增加规则判断及 AI 解读；个股另提供评分与模型信号。默认关闭。"
+    )
     assert visible["cleanup_previous_reports"]["description"] == "清理历史原始报告"
     assert visible["cleanup_previous_reports"]["default"] is True
     assert visible["install_timeout_seconds"]["default"] == 1800

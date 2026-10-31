@@ -532,3 +532,23 @@ async def test_configure_continues_when_settings_sync_fails(tmp_path):
     result = await service._configure(allow_install=False)
 
     assert result.ok
+
+
+@pytest.mark.asyncio
+async def test_reused_external_service_is_not_configured(tmp_path, monkeypatch):
+    """健康复用外部服务时不能写配置，只能由服务端自行管理。"""
+    seen = []
+    service = make_launcher(
+        tmp_path, settings_sync=lambda instance: seen.append(instance)
+    )
+
+    async def healthy(_url):
+        return True
+
+    monkeypatch.setattr(launcher, "probe_health", healthy)
+
+    outcome = await service.ensure_ready(wait_timeout=1)
+
+    assert outcome.ok
+    assert seen == []
+    await service.stop()

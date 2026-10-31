@@ -559,6 +559,24 @@ def test_image_timeout_default():
 
 
 @pytest.mark.asyncio
+async def test_objective_report_markdown_delivers_without_score_sections(tmp_path):
+    """客观模式 Markdown 不含评分/信号，交付链路不做结构假设并原样渲染。"""
+    service = manager(tmp_path)
+    event = Event()
+    text = (
+        "# 贵州茅台（600519）\n\n"
+        "## 一、行情与估值\n\n"
+        "| 指标 | 数值 |\n| --- | --- |\n| 收盘价 | 1500.00 |\n\n"
+        "数据来源：公开行情；数据日期：2026-10-30。"
+    )
+
+    await deliver(service, event, text)
+
+    assert len(event.messages) == 1 and event.messages[0].kind == "image"
+    assert event.messages[0].data == text.encode()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["large", "small", "invalid"])
 async def test_prepared_image_bytes(tmp_path, caplog, mode):
     import io

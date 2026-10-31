@@ -82,6 +82,25 @@ class StockRobotClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
+    async def fetch_config(self, timeout: float = 3) -> dict | None:
+        """只读分析服务配置；失败返回 None，由调用方决定是否提示。"""
+        try:
+            resp = await self._http.get(
+                f"{self._base_url}/api/v1/config", timeout=timeout
+            )
+        except httpx.HTTPError as exc:
+            logger.debug("读取分析服务配置失败: %s", redact(str(exc)))
+            return None
+        if resp.status_code != 200:
+            logger.debug("读取分析服务配置返回 HTTP %s", resp.status_code)
+            return None
+        try:
+            payload = resp.json()
+        except ValueError:
+            logger.debug("分析服务配置响应不是有效 JSON")
+            return None
+        return payload if isinstance(payload, dict) else None
+
     async def analyze_stock(
         self, symbol: str, effective_timeout: int
     ) -> AnalyzeOutcome:
