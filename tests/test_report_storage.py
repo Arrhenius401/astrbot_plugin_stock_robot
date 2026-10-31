@@ -1,7 +1,6 @@
 """真实文件的留存边界、恢复、归属保护和容量淘汰。"""
 
 import asyncio
-import hashlib
 import json
 import os
 import subprocess
@@ -245,85 +244,6 @@ def test_partial_png_write_is_not_retained_as_valid_image(store, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_raw_cleanup_default_busy_and_ownership_gates(store):
-    calls = []
-    store.clean_raw = lambda: calls.append("raw")
-    store.can_clean_raw = lambda: True
-    await store.sweep()
-    assert not calls
-    store.cleanup_raw = True
-    store.busy = lambda: True
-    await store.sweep()
-    assert not calls
-    store.busy = lambda: False
-    store.can_clean_raw = lambda: False
-    await store.sweep()
-    assert not calls
-    store.can_clean_raw = lambda: True
-    await store.sweep()
-    assert calls == ["raw"]
-
-
-def test_formatter_hash_matches_managed_release():
-    assert report_storage.FORMATTER_SHA256 == (
-        "40b9779816eee0d657b615812deec86669b5479ef233c59bef64c6c29008b536"
-    )
-
-
-def test_raw_reports_verified_layout_and_unknown_files(store, monkeypatch):
-    formatter = store.data_dir / "instance/src/src/report/formatter.py"
-    formatter.parent.mkdir(parents=True)
-    formatter.write_bytes(b"verified fixture formatter")
-    monkeypatch.setattr(
-        report_storage,
-        "FORMATTER_SHA256",
-        hashlib.sha256(formatter.read_bytes()).hexdigest(),
-    )
-    month = store.data_dir / "instance/reports/index/000300/2026-10"
-    month.mkdir(parents=True)
-    old = month / "000300_20261001_120000.md"
-    paired = month / "000300_20261001_120001.md"
-    snapshot = paired.with_suffix(".report.json")
-    new_index = month / "000300_20261001_120002_1234567890abcdef1234567890abcdef.md"
-    recent = month / "000300_20261010_120000.md"
-    unknown = month / "user-report.md"
-    for path in (old, recent, unknown, paired, snapshot, new_index):
-        path.write_text("keep unless expired known report")
-        os.utime(path, (store.now[0], store.now[0]))
-    os.utime(old, (store.now[0] - 7 * 86400 - 1,) * 2)
-    os.utime(paired, (store.now[0] - 20 * 86400,) * 2)
-    os.utime(new_index, (store.now[0] - 20 * 86400,) * 2)
-    os.utime(unknown, (store.now[0] - 20 * 86400,) * 2)
-    formatter.write_bytes(b"unsupported version")
-    store.clean_raw()
-    assert old.exists()
-    formatter.write_bytes(b"verified fixture formatter")
-    store.clean_raw()
-    assert not old.exists() and recent.exists() and unknown.exists()
-    assert paired.exists() and snapshot.exists() and new_index.exists()
-
-
-def test_raw_removes_only_verified_empty_subdirectories(store, monkeypatch):
-    formatter = store.data_dir / "instance/src/src/report/formatter.py"
-    formatter.parent.mkdir(parents=True)
-    formatter.write_bytes(b"known")
-    monkeypatch.setattr(
-        report_storage, "FORMATTER_SHA256", hashlib.sha256(b"known").hexdigest()
-    )
-    month = store.data_dir / "instance/reports/stock/600519/2026-10"
-    month.mkdir(parents=True)
-    old = month / "600519_20261001_120000.md"
-    old.write_text("report")
-    os.utime(old, (store.now[0] - 8 * 86400,) * 2)
-    other = store.data_dir / "instance/reports/backtests/keep.md"
-    other.parent.mkdir()
-    other.write_text("keep")
-    store.clean_raw()
-    assert not month.parent.exists()
-    assert other.read_text() == "keep"
-
-
-@pytest.mark.asyncio
 async def test_cross_instance_lock_disables_deletion(store):
     second = ReportStorage(store.data_dir)
     await second.start()
@@ -470,16 +390,3 @@ def test_interrupted_gold_delivery_keeps_failure_retention_window(store):
     store.now[0] += 1
     store.clean()
     assert not directory.exists()
-
-
-def test_raw_cleanup_keeps_old_gold_reports(store, monkeypatch):
-    formatter = store.data_dir / "instance/src/src/report/formatter.py"
-    formatter.parent.mkdir(parents=True)
-    formatter.write_bytes(b"known")
-    monkeypatch.setattr(report_storage, "FORMATTER_SHA256", hashlib.sha256(b"known").hexdigest())
-    gold = store.data_dir / "instance/reports/gold/GOLD/2026-10/GOLD_20261001_120000_1234.md"
-    gold.parent.mkdir(parents=True)
-    gold.write_text("黄金原始报告", encoding="utf-8")
-    os.utime(gold, (store.now[0] - 20 * 86400,) * 2)
-    store.clean_raw()
-    assert gold.read_text(encoding="utf-8") == "黄金原始报告"

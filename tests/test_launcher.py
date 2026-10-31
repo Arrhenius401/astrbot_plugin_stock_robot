@@ -111,34 +111,6 @@ async def test_failed_candidate_start_rolls_back_and_starts_previous(tmp_path, m
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "condition",
-    ["owned", "external", "disabled", "shared", "exited", "installing", "bad-record"],
-)
-async def test_original_report_cleanup_requires_owned_ready_process(
-    tmp_path, monkeypatch, condition
-):
-    options = {}
-    if condition == "external":
-        options["base_url"] = "https://example.org"
-    if condition == "disabled":
-        options["auto_install"] = False
-    service = make_launcher(tmp_path, **options)
-    service._state = "ready"
-    service._process = types.SimpleNamespace(
-        returncode=0 if condition == "exited" else None
-    )
-    if condition == "shared":
-        service._process = None
-    monkeypatch.setattr(
-        launcher, "instance_ready", lambda *args: condition != "bad-record"
-    )
-    if condition == "installing":
-        service._task = asyncio.get_running_loop().create_future()
-    assert service.owns_ready_service() == (condition == "owned")
-
-
-@pytest.mark.asyncio
 async def test_managed_release_upgrade_passes_pinned_tag_to_bootstrap(tmp_path, monkeypatch):
     service = make_launcher(
         tmp_path,
@@ -525,3 +497,38 @@ async def test_failed_install_is_not_repeated_during_call(tmp_path, monkeypatch)
     assert not (await service.ensure_ready(wait_timeout=1)).ok
     assert calls == 1
     await service.stop()
+
+
+def write_instance_config(tmp_path):
+    path = tmp_path / "instance" / ".stock_robot" / "config.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text("llm:\n  enabled: false\n", encoding="utf-8")
+    return path
+
+
+@pytest.mark.asyncio
+async def test_configure_syncs_settings_before_service_start(tmp_path):
+    write_instance_config(tmp_path)
+    seen = []
+    service = make_launcher(
+        tmp_path, settings_sync=lambda instance: seen.append(instance)
+    )
+
+    result = await service._configure(allow_install=False)
+
+    assert result.ok
+    assert seen == [tmp_path / "instance"]
+
+
+@pytest.mark.asyncio
+async def test_configure_continues_when_settings_sync_fails(tmp_path):
+    write_instance_config(tmp_path)
+
+    def broken(_instance):
+        raise OSError("配置被占用")
+
+    service = make_launcher(tmp_path, settings_sync=broken)
+
+    result = await service._configure(allow_install=False)
+
+    assert result.ok

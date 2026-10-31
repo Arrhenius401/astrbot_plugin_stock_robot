@@ -471,13 +471,13 @@ def test_settings_defaults_and_explicit_legacy_values(plugin_main, monkeypatch):
 
         monkeypatch.setattr(plugin_main, "ServiceLauncher", Launcher)
         monkeypatch.setattr(plugin_main, "ensure_chinese_font", lambda _: None)
-        for config, cleanup, timeout in [({}, True, 1800),
+        for config, timeout in [({}, 1800),
                 ({"cleanup_previous_reports": False, "install_timeout_seconds": 2400,
-                  "auto_install": False, "service_port": 18080}, False, 2400)]:
+                  "auto_install": False, "service_port": 18080}, 2400)]:
             plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), config)
             try:
                 await plugin.initialize()
-                assert plugin._storage.cleanup_raw is cleanup
+                assert callable(captured[-1]["settings_sync"])
                 assert plugin._install_timeout == timeout
                 assert captured[-1]["auto_install"] is True
                 assert captured[-1]["archive_url"] is None and captured[-1]["extras"] == ""

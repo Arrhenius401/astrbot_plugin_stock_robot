@@ -38,6 +38,7 @@ from .plugin_settings import migrate_port, resolve_legacy_extras
 from .report_delivery import ReportDelivery
 from .report_renderer import ReportRenderer
 from .report_storage import ReportStorage
+from .retention_sync import sync_cleanup_setting
 from .waiting_messages import SessionEvent, generate_text, notification_loop
 
 # 每个插件版本只自动安装已完成兼容验收的主仓正式版，不追随 latest。
@@ -149,14 +150,6 @@ class StockRobotPlugin(Star):
             storage=self._storage,
             send_message=getattr(context, "send_message", None),
         )
-        self._cleanup_uncertain = False
-        self._storage.cleanup_raw = bool(config.get("cleanup_previous_reports", True))
-        self._storage.busy = lambda: self._delivery._reserved > 0
-        self._storage.can_clean_raw = lambda: (
-            not self._cleanup_uncertain
-            and self._launcher is not None
-            and self._launcher.owns_ready_service()
-        )
         self._analysis_locks: dict[tuple[str, str], tuple[asyncio.Lock, int]] = {}
         self._analysis_tasks: set[asyncio.Task] = set()
         self._late_tasks: dict[tuple[str, str, str], asyncio.Task] = {}
@@ -210,6 +203,7 @@ class StockRobotPlugin(Star):
             progress=progress,
             llm_loader=partial(read_llm_config, self.context),
             managed_release_tag=MANAGED_RELEASE_TAG,
+            settings_sync=partial(sync_cleanup_setting, self.config, data_dir),
         )
         self._launcher.start_background()
         await self._storage.start()
@@ -593,11 +587,9 @@ class StockRobotPlugin(Star):
                 )
         except asyncio.CancelledError:
             if not self._stopping and kind in {"stock", "index"}:
-                self._cleanup_uncertain = True
                 self._schedule_late_report(event, kind, symbol, started_at)
             raise
         except (AnalysisStillRunning, TimeoutError):
-            self._cleanup_uncertain = True
             if kind in {"stock", "index"}:
                 await self._late_notice(
                     event,
@@ -679,19 +671,13 @@ class StockRobotPlugin(Star):
                 return
         effective_timeout = remaining()
 
-        # 超时/取消或错误响应不能证明服务端分析停止；保持保守清理状态。
-        try:
-            if kind == "stock":
-                outcome = await self._client.analyze_stock(symbol, effective_timeout)
-            elif kind == "index":
-                outcome = await self._client.analyze_index(symbol, effective_timeout)
-            else:
-                outcome = await self._client.analyze_gold(effective_timeout)
-        except BaseException:
-            self._cleanup_uncertain = True
-            raise
+        if kind == "stock":
+            outcome = await self._client.analyze_stock(symbol, effective_timeout)
+        elif kind == "index":
+            outcome = await self._client.analyze_index(symbol, effective_timeout)
+        else:
+            outcome = await self._client.analyze_gold(effective_timeout)
         if not outcome.ok:
-            self._cleanup_uncertain = True
             if (
                 getattr(outcome, "ambiguous", False)
                 and started_at is not None

@@ -43,14 +43,10 @@ def plugin_module(monkeypatch, tmp_path):
 
     class Launcher:
         def __init__(self, **kwargs):
-            self.owned = False
             self.stopped = False
 
         def start_background(self):
             pass
-
-        def owns_ready_service(self):
-            return self.owned
 
         async def ensure_ready(self, **kwargs):
             return SimpleNamespace(ok=True)
@@ -83,13 +79,12 @@ class Event:
 async def test_plugin_entry_creates_retained_report_and_stops_cleanly(plugin_module):
     plugin = plugin_module.StockRobotPlugin(SimpleNamespace(), {})
     await plugin.initialize()
-    assert plugin._storage.enabled and plugin._storage.cleanup_raw
+    assert plugin._storage.enabled
 
     class Client:
         closed = False
 
         async def analyze_index(self, *args):
-            assert plugin._storage.busy()
             return SimpleNamespace(ok=True)
 
         async def latest_report_id(self, *args):
@@ -125,12 +120,12 @@ async def test_plugin_entry_creates_retained_report_and_stops_cleanly(plugin_mod
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["response", "timeout", "cancel"])
-async def test_uncertain_analysis_blocks_raw_cleanup(plugin_module, failure):
+async def test_uncertain_analysis_keeps_delivery_released(plugin_module, failure):
+    """分析失败或取消后不得占用交付名额；原始报告清理由主仓负责。"""
     plugin = plugin_module.StockRobotPlugin(
         SimpleNamespace(), {"cleanup_previous_reports": True}
     )
     await plugin.initialize()
-    plugin._launcher.owned = True
 
     class Client:
         async def analyze_index(self, *args):
@@ -150,8 +145,6 @@ async def test_uncertain_analysis_blocks_raw_cleanup(plugin_module, failure):
         await plugin._run_analysis(Event(), "index", "000300", [])
     except asyncio.CancelledError:
         pass
-    assert plugin._cleanup_uncertain
-    assert not plugin._storage.can_clean_raw()
     assert plugin._delivery._reserved == 0
     await plugin.terminate()
 

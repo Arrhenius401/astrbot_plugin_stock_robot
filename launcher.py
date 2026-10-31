@@ -73,6 +73,7 @@ class ServiceLauncher:
         package_index_url: str = "",
         progress: InstallProgress | None = None,
         managed_release_tag: str | None = None,
+        settings_sync: Callable[[Path], Any] | None = None,
     ):
         parsed = urlsplit(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -109,6 +110,7 @@ class ServiceLauncher:
         self.package_index_url = package_index_url
         self.progress = progress or InstallProgress(data_dir / "service.log")
         self.managed_release_tag = managed_release_tag
+        self._settings_sync = settings_sync
         self.data_dir = data_dir
         self.instance = data_dir / "instance"
         self._llm = llm
@@ -127,19 +129,6 @@ class ServiceLauncher:
     @property
     def state(self) -> State:
         return self._state
-
-    def owns_ready_service(self) -> bool:
-        """健康复用不能证明进程归属；只允许本实例持有的已校验进程。"""
-        return (
-            not self._stopped
-            and self._can_start
-            and self.auto_install
-            and self._state == "ready"
-            and self._process is not None
-            and self._process.returncode is None
-            and (self._task is None or self._task.done())
-            and instance_ready(self.instance, self.extras)
-        )
 
     def _get_or_create_task(
         self, allow_install: bool
@@ -233,6 +222,11 @@ class ServiceLauncher:
         for key in ("llm", "api"):
             if key in config and not isinstance(config[key], dict):
                 return StepResult(False, f"配置文件 {key} 必须为对象，请修复原文件")
+        if self._settings_sync is not None:
+            try:
+                await asyncio.to_thread(self._settings_sync, self.instance)
+            except Exception as exc:  # noqa: BLE001 — 同步失败不阻止服务启动
+                logger.warning("报告清理设置同步失败：%s", type(exc).__name__)
         return StepResult(True)
 
     async def _prepare(self, allow_install: bool) -> ReadyOutcome:

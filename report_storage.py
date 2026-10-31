@@ -1,16 +1,14 @@
-"""插件报告留存、诊断与受保护的周期清理。"""
+"""插件报告留存、诊断与插件自有产物的周期清理。"""
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import math
 import re
 import threading
 import time
 import uuid
-from collections.abc import Callable
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -19,8 +17,6 @@ from astrbot.api import logger
 
 from .disk_support import FileLock, RotatingLog, safe_path
 
-# 与 main.py MANAGED_RELEASE_TAG 对应的 src/report/formatter.py；升级受管版本时同步更新。
-FORMATTER_SHA256 = "40b9779816eee0d657b615812deec86669b5479ef233c59bef64c6c29008b536"
 TASK_ID = re.compile(r"[0-9a-f]{32}")
 ARTIFACT = re.compile(r"(?:stock|index|gold)_[A-Za-z0-9_-]{1,32}_\d{8}_\d{6}\.(?:md|png)")
 
@@ -56,9 +52,6 @@ class ReportStorage:
         self.enabled = False
         self._gate = asyncio.Lock()
         self._periodic = None
-        self.can_clean_raw: Callable[[], bool] = lambda: False
-        self.cleanup_raw = False
-        self.busy: Callable[[], bool] = lambda: bool(self.active)
 
     async def io(self, function, *args):
         """取消也等待线程完成，不能在文件工作未结束时解除保护。"""
@@ -122,11 +115,6 @@ class ReportStorage:
         try:
             await self.io(RotatingLog(self.data_dir / "service.log").write, "")
             await self.io(self.clean)
-            if self.cleanup_raw and not self.busy():
-                if self.can_clean_raw():
-                    await self.io(self.clean_raw)
-                else:
-                    logger.debug("原始报告清理跳过：服务归属、任务状态或版本未确认")
         except Exception as error:  # noqa: BLE001 — 清理失败不阻止报告分析
             logger.warning("报告清理失败，继续服务: %s", type(error).__name__)
 
@@ -406,55 +394,3 @@ class ReportStorage:
         except OSError as error:
             logger.warning("报告文件删除失败: %s", type(error).__name__)
             return False
-
-    @serialized
-    def clean_raw(self):
-        instance = self.data_dir / "instance"
-        formatter = instance / "src/src/report/formatter.py"
-        root = instance / "reports"
-        if not safe_path(formatter) or not safe_path(root):
-            return
-        if (
-            not formatter.is_file()
-            or hashlib.sha256(formatter.read_bytes()).hexdigest() != FORMATTER_SHA256
-        ):
-            logger.warning("原始报告清理跳过：未验证的服务报告布局")
-            return
-        if not root.is_dir():
-            return
-        for kind in ("stock", "index"):
-            category = root / kind
-            if not safe_path(category) or not category.is_dir():
-                continue
-            for symbol in category.iterdir():
-                if (
-                    not re.fullmatch(r"[A-Za-z0-9_-]+", symbol.name)
-                    or not safe_path(symbol)
-                    or not symbol.is_dir()
-                ):
-                    continue
-                for month in symbol.iterdir():
-                    if (
-                        not re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", month.name)
-                        or not safe_path(month)
-                        or not month.is_dir()
-                    ):
-                        continue
-                    for path in month.iterdir():
-                        if not re.fullmatch(
-                            re.escape(symbol.name) + r"_\d{8}_\d{6}\.md", path.name
-                        ):
-                            continue
-                        if (
-                            safe_path(path)
-                            and path.is_file()
-                            # 有结构快照时保留整组，避免破坏报告库与重试。
-                            and not path.with_suffix(".report.json").exists()
-                            and not path.with_suffix(".report.json").is_symlink()
-                            and self.clock() - path.stat().st_mtime > 7 * 86400
-                        ):
-                            path.unlink()
-                    if safe_path(month) and not any(month.iterdir()):
-                        month.rmdir()
-                if safe_path(symbol) and not any(symbol.iterdir()):
-                    symbol.rmdir()
