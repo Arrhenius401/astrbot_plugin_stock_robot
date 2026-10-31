@@ -42,7 +42,7 @@ from .service_settings import SyncOutcome, sync_service_settings
 from .waiting_messages import SessionEvent, generate_text, notification_loop
 
 # 每个插件版本只自动安装已完成兼容验收的主仓正式版，不追随 latest。
-MANAGED_RELEASE_TAG = "v0.3.1"
+MANAGED_RELEASE_TAG = "v0.3.2"
 
 
 LATE_REPORT_WAIT_SECONDS = 120
