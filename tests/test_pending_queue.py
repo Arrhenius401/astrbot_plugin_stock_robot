@@ -128,3 +128,30 @@ def test_gold_queue_rejects_other_symbols(tmp_path, symbol):
     with pytest.raises(ValueError):
         queue.enqueue("group", "gold", symbol)
     assert queue.get("group") is None
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("aapl", "AAPL"),
+    ("AAPL.US", "AAPL"),
+    ("BRK-B", "BRK.B"),
+    ("BRK.B", "BRK.B"),
+    ("brk.b", "BRK.B"),
+    ("SH600519", "600519"),
+    ("SZ000001", "000001"),
+    ("HK00700", "00700.HK"),
+    ("00700", "00700.HK"),
+])
+def test_canonical_symbol_us_and_a_hk_forms(raw, expected):
+    assert pending.canonical_symbol("stock", raw) == expected
+
+
+def test_duplicate_us_spelling_refreshes_without_extra_slot(tmp_path):
+    queue = pending.PendingQueue(tmp_path / "waiting.sqlite3")
+    queue.enqueue("group", "stock", "AAPL.US")
+    queue.enqueue("group", "stock", "aapl")
+    assert queue.get("group")["targets"] == [{"kind": "stock", "symbol": "AAPL"}]
+
+
+def test_canonical_symbol_rejects_malformed_us_code():
+    with pytest.raises(ValueError):
+        pending.canonical_symbol("stock", "AAPL US")

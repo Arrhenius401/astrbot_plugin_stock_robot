@@ -14,10 +14,22 @@ from typing import Any
 
 CONFIRM_SECONDS = 30 * 60
 MAX_TARGETS = 3
+_US_SUFFIX = ".US"
+_US_PATTERN = re.compile(r"[A-Z][A-Z0-9]{0,9}(?:[.-][A-Z0-9]{1,2})?")
+
+
+def _us_symbol(value: str) -> str | None:
+    """美股代码统一大写、去 .US，单字母类别股用点号（BRK-B → BRK.B）。"""
+    candidate = value.removesuffix(_US_SUFFIX)
+    if not _US_PATTERN.fullmatch(candidate):
+        return None
+    if re.fullmatch(r"[A-Z][A-Z0-9]{0,9}-[A-Z]", candidate):
+        candidate = candidate.replace("-", ".", 1)
+    return candidate
 
 
 def canonical_symbol(kind: str, raw: str) -> str:
-    """合并同一港股的常用写法，并固定黄金市场简报的内部身份。"""
+    """合并同一港股/美股的常用写法，并固定黄金市场简报的内部身份。"""
     value = raw.strip().upper()
     if kind == "gold":
         if value != "GOLD":
@@ -29,6 +41,12 @@ def canonical_symbol(kind: str, raw: str) -> str:
         hk = re.fullmatch(r"(?:HK)?(\d{5})(?:\.HK)?", value)
         if hk:
             return hk.group(1) + ".HK"
+        domestic_prefixed = re.fullmatch(r"(?:SH|SZ)?(\d{6})", value)
+        if domestic_prefixed:
+            return domestic_prefixed.group(1)
+        us = _us_symbol(value)
+        if us is not None:
+            return us
     domestic = re.fullmatch(r"(?:SH|SZ)?(\d{6})", value)
     if domestic:
         return domestic.group(1)
