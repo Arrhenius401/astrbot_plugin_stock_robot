@@ -42,7 +42,7 @@ from .service_settings import SyncOutcome, sync_service_settings
 from .waiting_messages import SessionEvent, generate_text, notification_loop
 
 # 每个插件版本只自动安装已完成兼容验收的主仓正式版，不追随 latest。
-MANAGED_RELEASE_TAG = "v0.3.2"
+MANAGED_RELEASE_TAG = "v0.4.0"
 
 
 LATE_REPORT_WAIT_SECONDS = 120
@@ -478,12 +478,13 @@ class StockRobotPlugin(Star):
 
     @filter.llm_tool(name="analyze_stock")
     async def analyze_stock(self, event: AstrMessageEvent, symbol: str):
-        """分析一只 A 股或港股个股，并把完整研报以图片发送给用户。
+        """分析一只 A 股、港股或美股个股，并把完整研报以图片发送给用户。
 
-        当用户询问某只 A 股或港股个股的分析、评价、是否值得关注或买入时使用。
+        当用户询问某只 A 股、港股或美股个股的分析、评价、是否值得关注或买入时使用。
+        美股本期提供客观数据，不含行业同行对比、综合评分与交易信号。
 
         Args:
-            symbol(string): A 股 6 位代码或港股 5 位代码，例如 600519、00700.HK
+            symbol(string): A 股 6 位代码、港股 5 位代码或美股字母代码，例如 600519、00700.HK、AAPL、MSFT、BRK.B
         """
         note: list[str] = []
         await self._run_analysis(event, "stock", symbol, note)

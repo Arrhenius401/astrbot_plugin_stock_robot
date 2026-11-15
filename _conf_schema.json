@@ -1,7 +1,7 @@
 {
   "extra_analysis_enabled": {
     "description": "额外分析", "type": "bool", "default": false,
-    "hint": "为个股和指数增加规则判断及 AI 解读；个股另提供评分与模型信号。默认关闭。"
+    "hint": "为 A 股/港股个股和指数增加规则判断及 AI 解读；A 股/港股个股另提供评分与模型信号。美股本期不参与该开关。默认关闭。"
   },
   "cleanup_previous_reports": {
     "description": "清理历史原始报告", "type": "bool", "default": true,

@@ -290,7 +290,8 @@ class StockRobotClient:
                 )
             return AnalyzeOutcome(
                 False,
-                f"❌ 无法识别代码 {symbol}，请提供 A 股 6 位代码（如 600519）或港股 5 位代码（如 00700.HK）",
+                f"❌ 无法识别代码 {symbol}，请提供 A 股 6 位代码（如 600519）、"
+                "港股 5 位代码（如 00700.HK）或美股代码（如 AAPL）",
             )
 
         if resp.status_code >= 400:
