@@ -100,9 +100,7 @@ async def test_real_venv_candidate_failure_restores_legacy_http_service(tmp_path
         assert health == {"status": "ok", "version": "v0.1.0"}
         assert config.read_text() == "llm: {enabled: false}\n"
         assert report.read_text() == "retained report"
-        candidate = next((instance / ".releases").glob("release-*"))
-        code, output = await offline_runner([str(bootstrap.venv_launcher(candidate)), "--help"], instance)
-        assert code == 0 and "v0.2.0" in output
+        assert not list((instance / ".releases").glob("release-*"))
         assert "candidate startup failure" in (tmp_path / "service.log").read_text("utf-8")
         assert any("已恢复旧版本" in record.message for record in caplog.records)
     finally:

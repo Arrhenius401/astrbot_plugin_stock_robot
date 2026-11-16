@@ -23,6 +23,7 @@ from .bootstrap import (
     confirm_runtime,
     ensure_instance,
     instance_ready,
+    prune_legacy_runtime,
     prune_runtimes,
     reap_process,
     redact,
@@ -185,6 +186,36 @@ class ServiceLauncher:
         logger.warning("服务未就绪：%s", self._reason)
         return ReadyOutcome(False, self._reason)
 
+    async def _cleanup_runtimes(self, *, legacy: bool) -> None:
+        """删除未使用的自举目录；拿不到服务锁时跳过，避免删除他实例候选。"""
+        if not self._can_start or not self.auto_install:
+            return
+        try:
+            if self._stopped or runtime_pending(self.instance):
+                return
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning("活动版本指针无效，跳过旧版本清理：%s", type(exc).__name__)
+            return
+        acquired = False
+        if self._service_lock.file is None:
+            if not self._service_lock.acquire():
+                logger.debug("另一个插件实例正在准备服务，跳过旧版本清理")
+                return
+            acquired = True
+        try:
+            # 等待锁期间指针可能变化，持锁后再次确认；健康复用不能确认未知候选。
+            if self._stopped or runtime_pending(self.instance):
+                return
+            confirm_runtime(self.instance, drop_previous=True)
+            if legacy:
+                await asyncio.to_thread(prune_legacy_runtime, self.instance)
+            await asyncio.to_thread(prune_runtimes, self.instance)
+        except Exception as exc:  # noqa: BLE001 — 清理失败不阻止服务启动
+            logger.warning("旧版本目录清理失败：%s", type(exc).__name__)
+        finally:
+            if acquired:
+                self._service_lock.close()
+
     async def _load_llm(self) -> dict[str, Any] | None:
         if self._llm_loader is None:
             return self._llm
@@ -239,6 +270,7 @@ class ServiceLauncher:
             if await probe_health(self.base_url):
                 self._state = "ready"
                 self._reason = ""
+                await self._cleanup_runtimes(legacy=False)
                 return ReadyOutcome(True)
             if not self._can_start or not self.auto_install:
                 return self._failure(
@@ -296,8 +328,14 @@ class ServiceLauncher:
                 logger.warning("新版本健康检查失败，已恢复旧版本并重新启动")
                 outcome = await self._start()
             if outcome.ok:
-                confirm_runtime(self.instance)
-                prune_runtimes(self.instance)
+                try:
+                    confirm_runtime(self.instance, drop_previous=True)
+                except (OSError, ValueError, TypeError) as exc:
+                    logger.warning(
+                        "活动版本确认失败，保留回滚指针：%s", type(exc).__name__
+                    )
+                else:
+                    await self._cleanup_runtimes(legacy=True)
                 self.progress.emit("分析服务已就绪；" + self.progress.describe())
             return outcome
         except asyncio.CancelledError:

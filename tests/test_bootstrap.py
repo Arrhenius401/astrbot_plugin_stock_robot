@@ -149,6 +149,169 @@ def test_prune_only_removes_owned_unprotected_runtime(tmp_path):
     assert not stale.exists()
 
 
+def test_prune_skips_when_active_runtime_directory_is_missing(tmp_path):
+    stale = tmp_path / ".releases/release-stale"
+    stale.mkdir(parents=True)
+    (stale / ".bootstrap-runtime.json").write_text(
+        json.dumps({"owner": "stock-robot-bootstrap-v1"})
+    )
+    (tmp_path / "active-runtime.json").write_text(
+        json.dumps({"active": ".releases/release-missing"})
+    )
+
+    bootstrap.prune_runtimes(tmp_path)
+    assert stale.is_dir()
+
+
+def test_prune_removes_previous_release_by_default_and_can_keep_it(tmp_path):
+    active = tmp_path / ".releases/release-active"
+    previous = tmp_path / ".releases/release-previous"
+    for candidate in (active, previous):
+        candidate.mkdir(parents=True)
+        (candidate / ".bootstrap-runtime.json").write_text(
+            json.dumps({"owner": "stock-robot-bootstrap-v1"})
+        )
+    (tmp_path / "active-runtime.json").write_text(json.dumps({
+        "active": ".releases/release-active",
+        "previous": ".releases/release-previous",
+    }))
+
+    bootstrap.prune_runtimes(tmp_path)
+    assert active.is_dir() and not previous.exists()
+
+    previous.mkdir()
+    (previous / ".bootstrap-runtime.json").write_text(
+        json.dumps({"owner": "stock-robot-bootstrap-v1"})
+    )
+    bootstrap.prune_runtimes(tmp_path, keep_previous=True)
+    assert active.is_dir() and previous.is_dir()
+
+
+def test_confirm_drops_previous_and_blocks_rollback(tmp_path):
+    active = tmp_path / ".releases/release-active"
+    previous = tmp_path / ".releases/release-previous"
+    active.mkdir(parents=True)
+    previous.mkdir()
+    pointer = tmp_path / "active-runtime.json"
+    pointer.write_text(json.dumps({
+        "active": ".releases/release-active",
+        "previous": ".releases/release-previous",
+        "pending_health": True,
+    }))
+
+    bootstrap.confirm_runtime(tmp_path, drop_previous=True)
+
+    assert json.loads(pointer.read_text()) == {
+        "active": ".releases/release-active",
+        "pending_health": False,
+    }
+    assert bootstrap.rollback_runtime(tmp_path) is False
+    assert bootstrap.runtime_path(tmp_path) == active
+
+
+def test_prune_legacy_root_after_release_is_active(tmp_path):
+    info = {
+        "archive_url": bootstrap.release_archive_url("v0.2.1"),
+        "archive_sha256": "a" * 64,
+        "release_tag": "v0.2.1",
+    }
+    root = tmp_path
+    (root / ".releases/release-active").mkdir(parents=True)
+    (root / "src").mkdir()
+    (root / "src/pyproject.toml").touch()
+    (root / "src/.bootstrap-source.json").write_text(json.dumps(info))
+    (root / "venv").mkdir()
+    (root / "venv/marker").touch()
+    (root / "install-state.json").write_text(json.dumps({
+        "version": 1,
+        "extras": "",
+        "source": info,
+        "dependency_strategy": "locked-requirements-v1",
+    }))
+    (root / ".stock_robot").mkdir()
+    (root / "reports").mkdir()
+    (root / "active-runtime.json").write_text(json.dumps({
+        "active": ".releases/release-active",
+        "pending_health": False,
+    }))
+
+    bootstrap.prune_legacy_runtime(root)
+
+    assert not (root / "src").exists()
+    assert not (root / "venv").exists()
+    assert not (root / "install-state.json").exists()
+    assert (root / ".stock_robot").is_dir()
+    assert (root / "reports").is_dir()
+
+
+def test_prune_legacy_keeps_active_or_unverified_root(tmp_path):
+    info = {
+        "archive_url": bootstrap.release_archive_url("v0.2.1"),
+        "archive_sha256": "a" * 64,
+        "release_tag": "v0.2.1",
+    }
+    other = dict(info, release_tag="v0.1.0")
+    root = tmp_path
+    (root / "src").mkdir()
+    (root / "src/pyproject.toml").touch()
+    (root / "src/.bootstrap-source.json").write_text(json.dumps(info))
+    (root / "venv").mkdir()
+    (root / "install-state.json").write_text(json.dumps({
+        "version": 1,
+        "extras": "",
+        "source": other,
+    }))
+    (root / "active-runtime.json").write_text(json.dumps({
+        "active": ".releases/release-active",
+        "pending_health": False,
+    }))
+    (root / ".releases/release-active").mkdir(parents=True)
+
+    bootstrap.prune_legacy_runtime(root)
+    assert (root / "src").is_dir() and (root / "venv").is_dir()
+
+    (root / "active-runtime.json").write_text(json.dumps({
+        "active": ".",
+        "pending_health": False,
+    }))
+    (root / "install-state.json").write_text(json.dumps({
+        "version": 1,
+        "extras": "",
+        "source": info,
+    }))
+    bootstrap.prune_legacy_runtime(root)
+    assert (root / "src").is_dir() and (root / "venv").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_pending_upgrade_keeps_earlier_verified_previous(tmp_path, monkeypatch):
+    instance = tmp_path / "instance"
+    first = instance / ".releases/release-first"
+    pending = instance / ".releases/release-pending"
+    installed_stub(first, "v0.2.0")
+    installed_stub(pending, "v0.3.0")
+    (instance / "active-runtime.json").write_text(json.dumps({
+        "active": ".releases/release-pending",
+        "previous": ".releases/release-first",
+        "pending_health": True,
+    }))
+
+    async def install(candidate, *args, **kwargs):
+        installed_stub(candidate, "v0.4.0")
+        return bootstrap.StepResult(True)
+
+    monkeypatch.setattr(bootstrap, "ensure_instance", install)
+    result = await bootstrap.upgrade_instance(
+        instance, "v0.4.0", "", runner=None, install_timeout=60,
+        package_index_url="", progress=None,
+    )
+
+    assert result.ok
+    state = json.loads((instance / "active-runtime.json").read_text())
+    assert state["previous"] == ".releases/release-first"
+    assert (instance / ".releases/release-first").is_dir()
+
+
 def test_source_matches_only_explicit_pinned_release(tmp_path):
     source = tmp_path / "src"
     source.mkdir()

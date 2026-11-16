@@ -33,6 +33,7 @@ from astrbot.api import logger
 from .disk_support import RotatingLog, safe_path
 
 DEFAULT_ARCHIVE_URL: str | None = None
+RUNTIME_OWNER = {"owner": "stock-robot-bootstrap-v1"}
 RELEASE_API_URL = (
     "https://api.github.com/repos/Arrhenius401/stock_robot/releases/latest"
 )
@@ -149,13 +150,16 @@ def rollback_runtime(instance: Path) -> bool:
     current = runtime_path(instance)
     state = json.loads(pointer.read_text("utf-8"))
     previous = state.get("previous")
+    if previous is None:
+        return False
     if previous != "." and (
         not isinstance(previous, str)
         or not re.fullmatch(r"\.releases/[A-Za-z0-9_-]+", previous)
     ):
         raise ValueError("旧版指针无效")
-    if not safe_path(instance / previous):
-        raise ValueError("旧版目录路径不安全")
+    previous_path = instance / previous
+    if not previous_path.is_dir() or not safe_path(previous_path):
+        return False
     _write_json(pointer, {"active": previous,
                           "previous": current.relative_to(instance).as_posix(),
                           "rolled_back": True})
@@ -170,40 +174,131 @@ def runtime_pending(instance: Path) -> bool:
     return json.loads(pointer.read_text("utf-8")).get("pending_health") is True
 
 
-def confirm_runtime(instance: Path) -> None:
+def confirm_runtime(instance: Path, *, drop_previous: bool = False) -> None:
     pointer = instance / "active-runtime.json"
     if pointer.exists():
         runtime_path(instance)
         state = json.loads(pointer.read_text("utf-8"))
         state["pending_health"] = False
+        if drop_previous:
+            state.pop("previous", None)
         _write_json(pointer, state)
 
 
-def prune_runtimes(instance: Path) -> None:
-    """只清理自举器拥有、且不属于活动与回滚版本的目录。"""
+def _owned_runtime(candidate: Path) -> bool:
+    try:
+        return json.loads(
+            (candidate / ".bootstrap-runtime.json").read_text("utf-8")
+        ) == RUNTIME_OWNER
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _force_writable(function, path: str, _error) -> None:
+    os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+    function(path)
+
+
+def _remove_runtime(path: Path) -> bool:
+    """删除自举器目录；Windows 只读或短暂占用时有限重试。"""
+    for attempt in range(3):
+        try:
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(path, onexc=_force_writable)
+            else:
+                shutil.rmtree(path, onerror=_force_writable)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as error:
+            if attempt == 2:
+                logger.warning(
+                    "旧版本目录未清理：%s（%s）", path, type(error).__name__
+                )
+                return False
+            time.sleep(0.2)
+    return False
+
+
+def prune_runtimes(instance: Path, *, keep_previous: bool = False) -> None:
+    """只清理自举器拥有、且不属于活动版本的目录。"""
+    try:
+        active = runtime_path(instance)
+    except (OSError, ValueError, TypeError) as error:
+        logger.warning("活动版本指针无效，跳过旧版本清理：%s", type(error).__name__)
+        return
+    if not active.is_dir():
+        logger.warning("活动版本目录不存在，跳过旧版本清理")
+        return
     releases = instance / ".releases"
     if not releases.is_dir() or not safe_path(releases):
         return
-    protected = {runtime_path(instance)}
+    protected = {active}
     pointer = instance / "active-runtime.json"
-    if pointer.exists():
-        state = json.loads(pointer.read_text("utf-8"))
-        previous = state.get("previous")
-        if previous == "." or (isinstance(previous, str)
-                               and re.fullmatch(r"\.releases/[A-Za-z0-9_-]+", previous)):
-            protected.add(instance / previous)
+    if keep_previous and pointer.is_file():
+        try:
+            state = json.loads(pointer.read_text("utf-8"))
+            previous = state.get("previous") if isinstance(state, dict) else None
+            if previous == ".":
+                protected.add(instance)
+            elif isinstance(previous, str) and re.fullmatch(
+                r"\.releases/[A-Za-z0-9_-]+", previous
+            ):
+                candidate = instance / previous
+                if candidate.is_dir() and safe_path(candidate):
+                    protected.add(candidate)
+        except (OSError, ValueError, TypeError) as error:
+            logger.warning(
+                "回滚版本指针无效，本次不保护旧版本：%s", type(error).__name__
+            )
     for candidate in releases.iterdir():
         if (candidate in protected or not candidate.name.startswith("release-")
                 or not candidate.is_dir() or not safe_path(candidate)):
             continue
-        try:
-            owner = json.loads((candidate / ".bootstrap-runtime.json").read_text("utf-8"))
-            if owner != {"owner": "stock-robot-bootstrap-v1"}:
-                continue
-            # safe_path 已验证所有父路径，候选必为 releases 的直接子目录。
-            shutil.rmtree(candidate)
-        except (OSError, ValueError) as error:
-            logger.warning("旧版本目录未清理：%s（%s）", candidate, type(error).__name__)
+        if not _owned_runtime(candidate):
+            continue
+        # safe_path 已验证所有父路径，候选必为 releases 的直接子目录。
+        _remove_runtime(candidate)
+
+
+def prune_legacy_runtime(instance: Path) -> None:
+    """活动版本迁入 .releases 后，删除旧根目录安装产物。"""
+    try:
+        active = runtime_path(instance)
+    except (OSError, ValueError, TypeError) as error:
+        logger.warning("活动版本指针无效，跳过旧根目录清理：%s", type(error).__name__)
+        return
+    if active == instance:
+        return
+    if not active.is_dir():
+        logger.warning("活动版本目录不存在，跳过旧根目录清理")
+        return
+    state_path = instance / "install-state.json"
+    try:
+        state = json.loads(state_path.read_text("utf-8"))
+    except (OSError, ValueError, TypeError):
+        return
+    root_source = _source_info_at(instance)
+    if (
+        not isinstance(state, dict)
+        or state.get("version") != 1
+        or root_source is None
+        or state.get("source") != root_source
+    ):
+        return
+    # 先删 venv，再删 src：即使中途失败，下一次仍能靠 src 来源记录校验归属。
+    for name in ("venv", "src"):
+        path = instance / name
+        if not os.path.lexists(path):
+            continue
+        if not path.is_dir() or not safe_path(path) or not _remove_runtime(path):
+            return
+    try:
+        state_path.unlink(missing_ok=True)
+    except OSError as error:
+        logger.warning(
+            "旧根目录安装状态未清理：%s（%s）", state_path, type(error).__name__
+        )
 
 
 def venv_python(instance: Path) -> Path:
@@ -533,17 +628,23 @@ async def run_command(
     return process.returncode or 0, "\n".join(tail)
 
 
-def _source_info(instance: Path) -> dict[str, Any] | None:
+def _source_info_at(runtime: Path) -> dict[str, Any] | None:
     try:
-        instance = runtime_path(instance)
-        info = json.loads((instance / "src/.bootstrap-source.json").read_text("utf-8"))
+        info = json.loads((runtime / "src/.bootstrap-source.json").read_text("utf-8"))
     except (OSError, ValueError, TypeError):
         return None
     if not isinstance(info, dict) or not isinstance(info.get("archive_url"), str):
         return None
     if not re.fullmatch(r"[0-9a-f]{64}", str(info.get("archive_sha256", ""))):
         return None
-    return info if (instance / "src/pyproject.toml").is_file() else None
+    return info if (runtime / "src/pyproject.toml").is_file() else None
+
+
+def _source_info(instance: Path) -> dict[str, Any] | None:
+    try:
+        return _source_info_at(runtime_path(instance))
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
@@ -970,14 +1071,32 @@ async def upgrade_instance(
         return StepResult(False, "当前实例来源记录不完整，不能自动升级")
     if source_matches_release(instance, release_tag) and instance_ready(instance, extras):
         return StepResult(True, "已是插件验证版本")
+    pending = runtime_pending(instance)
     previous = runtime_path(instance)
+    if pending:
+        # 上次切换尚未确认健康；继续尝试时仍以更早的已验证版本为回滚目标。
+        try:
+            state = json.loads(
+                (instance / "active-runtime.json").read_text("utf-8")
+            )
+            prior = state.get("previous") if isinstance(state, dict) else None
+            if prior == ".":
+                previous = instance
+            elif isinstance(prior, str) and re.fullmatch(
+                r"\.releases/[A-Za-z0-9_-]+", prior
+            ):
+                prior_path = instance / prior
+                if prior_path.is_dir() and safe_path(prior_path):
+                    previous = prior_path
+        except (OSError, ValueError, TypeError):
+            pass
     releases = instance / ".releases"
     if not safe_path(releases):
         return StepResult(False, "版本目录路径不安全")
     releases.mkdir(exist_ok=True)
-    prune_runtimes(instance)
+    await asyncio.to_thread(prune_runtimes, instance, keep_previous=pending)
     candidate = Path(tempfile.mkdtemp(prefix="release-", dir=releases))
-    _write_json(candidate / ".bootstrap-runtime.json", {"owner": "stock-robot-bootstrap-v1"})
+    _write_json(candidate / ".bootstrap-runtime.json", RUNTIME_OWNER)
     try:
         if progress is not None:
             progress.enter(1, f"下载已验证版本 {release_tag}")
@@ -992,8 +1111,10 @@ async def upgrade_instance(
             expected_release_tag=release_tag,
         )
         if not result.ok:
+            await asyncio.to_thread(_remove_runtime, candidate)
             return StepResult(False, f"自动升级准备失败：{result.detail}")
         if not source_matches_release(candidate, release_tag):
+            await asyncio.to_thread(_remove_runtime, candidate)
             return StepResult(False, "自动升级候选版本与插件声明不一致")
         _write_json(instance / "active-runtime.json", {
             "active": candidate.relative_to(instance).as_posix(),
@@ -1003,6 +1124,7 @@ async def upgrade_instance(
         logger.info("候选版本已启用，等待服务健康检查：%s", release_tag)
         return StepResult(True, f"候选版本 {release_tag} 已就绪")
     except (OSError, ValueError) as exc:
+        await asyncio.to_thread(_remove_runtime, candidate)
         logger.warning("候选版本准备失败，保留旧版：%s", redact(str(exc)))
         return StepResult(False, f"候选版本准备失败，保留旧版：{redact(str(exc))}")
 

@@ -111,6 +111,80 @@ async def test_failed_candidate_start_rolls_back_and_starts_previous(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_successful_start_deletes_previous_and_legacy_root(tmp_path, monkeypatch):
+    instance = tmp_path / "instance"
+    active = instance / ".releases/release-active"
+    previous = instance / ".releases/release-previous"
+    for candidate in (active, previous):
+        candidate.mkdir(parents=True)
+        (candidate / ".bootstrap-runtime.json").write_text(
+            json.dumps({"owner": "stock-robot-bootstrap-v1"})
+        )
+    active_info = {
+        "archive_url": "https://example.org/v0.4.0.zip",
+        "archive_sha256": "a" * 64,
+        "release_tag": "v0.4.0",
+    }
+    root_info = {
+        "archive_url": "https://example.org/v0.2.1.zip",
+        "archive_sha256": "b" * 64,
+        "release_tag": "v0.2.1",
+    }
+    (active / "src").mkdir()
+    (active / "src/pyproject.toml").touch()
+    (active / "src/.bootstrap-source.json").write_text(json.dumps(active_info))
+    (instance / "src").mkdir()
+    (instance / "src/pyproject.toml").touch()
+    (instance / "src/.bootstrap-source.json").write_text(json.dumps(root_info))
+    (instance / "venv").mkdir()
+    (instance / "venv/marker").touch()
+    (instance / "install-state.json").write_text(json.dumps({
+        "version": 1,
+        "extras": "",
+        "source": root_info,
+    }))
+    (instance / "report").mkdir()
+    (instance / "active-runtime.json").write_text(json.dumps({
+        "active": ".releases/release-active",
+        "previous": ".releases/release-previous",
+        "pending_health": False,
+    }))
+
+    service = make_launcher(tmp_path, managed_release_tag="v0.4.0")
+
+    async def unhealthy(*_):
+        return False
+
+    async def configured(*_):
+        return launcher.StepResult(True)
+
+    async def started():
+        return launcher.ReadyOutcome(True)
+
+    monkeypatch.setattr(launcher, "probe_health", unhealthy)
+    monkeypatch.setattr(launcher, "instance_ready", lambda *_: True)
+    monkeypatch.setattr(launcher, "source_matches_release", lambda *_: True)
+    monkeypatch.setattr(service, "_configure", configured)
+    monkeypatch.setattr(service, "_start", started)
+
+    try:
+        outcome = await service._prepare(allow_install=True)
+        assert outcome.ok
+        assert active.is_dir()
+        assert not previous.exists()
+        assert not (instance / "src").exists()
+        assert not (instance / "venv").exists()
+        assert not (instance / "install-state.json").exists()
+        assert (instance / "report").is_dir()
+        assert json.loads((instance / "active-runtime.json").read_text()) == {
+            "active": ".releases/release-active",
+            "pending_health": False,
+        }
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_managed_release_upgrade_passes_pinned_tag_to_bootstrap(tmp_path, monkeypatch):
     service = make_launcher(
         tmp_path,
@@ -552,3 +626,30 @@ async def test_reused_external_service_is_not_configured(tmp_path, monkeypatch):
     assert outcome.ok
     assert seen == []
     await service.stop()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['external', 'pending', 'busy'])
+async def test_reused_health_cannot_confirm_or_prune_unowned_upgrade(tmp_path, monkeypatch, mode):
+    options = {'base_url': 'https://example.org', 'auto_install': False} if mode == 'external' else {}
+    service = make_launcher(tmp_path, **options)
+    active = service.instance / '.releases/release-active'
+    previous = service.instance / '.releases/release-previous'
+    for path in (active, previous):
+        path.mkdir(parents=True)
+        (path / '.bootstrap-runtime.json').write_text(json.dumps({'owner': 'stock-robot-bootstrap-v1'}))
+    pointer = service.instance / 'active-runtime.json'
+    state = {'active': '.releases/release-active', 'previous': '.releases/release-previous',
+             'pending_health': mode != 'external'}
+    pointer.write_text(json.dumps(state))
+    holder = launcher.FileLock(service._service_lock.path)
+    if mode == 'busy':
+        assert holder.acquire()
+    monkeypatch.setattr(launcher, 'probe_health', lambda *_: asyncio.sleep(0, True))
+    try:
+        outcome = await service._prepare(allow_install=True)
+        assert outcome.ok
+        assert previous.is_dir()
+        assert json.loads(pointer.read_text()) == state
+    finally:
+        holder.close()
+        await service.stop()
