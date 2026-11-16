@@ -41,7 +41,7 @@ from .report_storage import ReportStorage
 from .service_settings import SyncOutcome, sync_service_settings
 from .waiting_messages import SessionEvent, generate_text, notification_loop
 
-# 每个插件版本只自动安装已完成兼容验收的主仓正式版，不追随 latest。
+# 每个插件版本固定绑定已完成兼容验收的主仓正式标签，不追随开发分支或 latest。
 MANAGED_RELEASE_TAG = "v0.4.0"
 
 
@@ -481,7 +481,8 @@ class StockRobotPlugin(Star):
         """分析一只 A 股、港股或美股个股，并把完整研报以图片发送给用户。
 
         当用户询问某只 A 股、港股或美股个股的分析、评价、是否值得关注或买入时使用。
-        美股本期提供客观数据，不含行业同行对比、综合评分与交易信号。
+        默认提供客观数据；开启额外分析后，美股支持已核实的 TTM 同行经营比较、有效维度评分与 AI 解读。
+        美股仅在财务、技术、估值和行业四维均计分且充分时生成规则信号；缺项保留 N/A，不提供仓位或买卖动作。
 
         Args:
             symbol(string): A 股 6 位代码、港股 5 位代码或美股字母代码，例如 600519、00700.HK、AAPL、MSFT、BRK.B

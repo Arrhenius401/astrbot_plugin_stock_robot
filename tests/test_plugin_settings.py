@@ -20,7 +20,7 @@ def test_schema_visible_fields_and_plain_labels():
     assert visible["extra_analysis_enabled"]["description"] == "额外分析"
     assert visible["extra_analysis_enabled"]["default"] is False
     assert visible["extra_analysis_enabled"]["hint"] == (
-        "为 A 股/港股个股和指数增加规则判断及 AI 解读；A 股/港股个股另提供评分与模型信号。美股本期不参与该开关。默认关闭。"
+        "为 A 股/港股/美股个股和指数增加规则判断及 AI 解读；个股另提供有效维度评分，依据充分时生成规则信号。默认关闭。"
     )
     assert visible["cleanup_previous_reports"]["description"] == "清理历史原始报告"
     assert visible["cleanup_previous_reports"]["default"] is True

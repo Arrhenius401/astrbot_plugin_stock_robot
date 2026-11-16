@@ -297,7 +297,7 @@ def test_preparation_failure_never_analyzes(plugin_main, pending):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,symbol", [("stock", "00700.HK"), ("index", "000300")])
+@pytest.mark.parametrize("kind,symbol", [("stock", "00700.HK"), ("stock", "AAPL"), ("stock", "BRK.B"), ("index", "000300")])
 async def test_ready_analysis_sends_only_one_progress_message(plugin_main, kind, symbol):
     """服务就绪时只发送分析进度，避免连续出现两条等待提示。"""
     plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
@@ -1237,3 +1237,12 @@ async def test_late_recovery(plugin_main, monkeypatch, mode):
             assert "仍未生成报告" in event.send.await_args.args[0]
     finally:
         await plugin._client.aclose()
+
+
+def test_release_binding_and_us_tool_contract_match_current_core(plugin_main):
+    assert plugin_main.MANAGED_RELEASE_TAG == "v0.4.0"
+    description = plugin_main.StockRobotPlugin.analyze_stock.__doc__ or ""
+    assert "TTM 同行经营比较" in description
+    assert "四维均计分且充分" in description
+    assert "缺项保留 N/A" in description
+    assert "不含行业同行对比" not in description
