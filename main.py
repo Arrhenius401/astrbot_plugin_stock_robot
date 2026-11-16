@@ -493,12 +493,12 @@ class StockRobotPlugin(Star):
 
     @filter.llm_tool(name="analyze_index")
     async def analyze_index(self, event: AstrMessageEvent, symbol: str):
-        """分析一个 A 股指数，并把完整研报以图片发送给用户。
+        """分析一个 A 股或港股指数，并把完整研报以图片发送给用户。
 
-        当用户询问大盘或指数（如上证指数、沪深 300、中证 500）的走势与估值时使用。
+        当用户询问 A 股或港股指数的走势与估值时使用。美股指数暂未开放。
 
         Args:
-            symbol(string): 6 位指数代码，例如 000300、399006
+            symbol(string): A 股六位指数代码，或主仓目录中已核验的港股指数代码、明确名称；名称歧义时请用户选择具体代码。
         """
         note: list[str] = []
         await self._run_analysis(event, "index", symbol, note)

@@ -37,6 +37,18 @@ def canonical_symbol(kind: str, raw: str) -> str:
         return "GOLD"
     if kind not in {"stock", "index"}:
         raise ValueError("未知分析类型")
+    if kind == "index":
+        aliases = {
+            "恒生指数": "HSI", "恒指": "HSI", "HSI:00001.00": "HSI",
+            "恒生中国企业指数": "HSCEI", "恒生国企指数": "HSCEI", "国企指数": "HSCEI",
+            "HSI:00014.00": "HSCEI", "恒生科技指数": "HSTECH", "恒生科技": "HSTECH",
+            "HSI:02083.00": "HSTECH",
+        }
+        value = aliases.get(value, value)
+        # 名称由主仓目录消歧；官方指数身份保留冒号，不能作为文件路径使用。
+        if (re.fullmatch(r"HSI:\d{5}\.\d{2}|[\u4e00-\u9fffA-Z0-9._ -]{1,64}", value)
+                and not re.fullmatch(r"(?:SH|SZ)?\d{6}", value)):
+            return value
     if kind == "stock":
         hk = re.fullmatch(r"(?:HK)?(\d{5})(?:\.HK)?", value)
         if hk:

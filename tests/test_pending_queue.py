@@ -155,3 +155,22 @@ def test_duplicate_us_spelling_refreshes_without_extra_slot(tmp_path):
 def test_canonical_symbol_rejects_malformed_us_code():
     with pytest.raises(ValueError):
         pending.canonical_symbol("stock", "AAPL US")
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("恒生指数", "HSI"), ("hsi:00001.00", "HSI"),
+    ("恒生中国企业指数", "HSCEI"), ("HSI:00014.00", "HSCEI"),
+    ("HSI:02083.00", "HSTECH"), ("HSI:01067.00", "HSI:01067.00"),
+    ("恒生高股息", "恒生高股息"), ("sh000300", "000300"),
+])
+def test_hk_index_identity(raw, expected):
+    assert pending.canonical_symbol("index", raw) == expected
+
+
+def test_hk_queue_merges_price_alias_but_preserves_total_return(tmp_path):
+    queue = pending.PendingQueue(tmp_path / "waiting.sqlite3")
+    for symbol in ("恒生指数", "HSI:00001.00", "HSI:10068.00"):
+        queue.enqueue("group", "index", symbol)
+    assert queue.get("group")["targets"] == [
+        {"kind": "index", "symbol": "HSI"}, {"kind": "index", "symbol": "HSI:10068.00"},
+    ]

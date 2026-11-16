@@ -11,6 +11,7 @@ import httpx
 from astrbot.api import logger
 
 from .bootstrap import redact
+from .pending_queue import canonical_symbol
 
 DEFAULT_BASE_URL = "http://127.0.0.1:25618"
 DEFAULT_TIMEOUT_SECONDS = 150
@@ -111,9 +112,54 @@ class StockRobotClient:
     async def analyze_index(
         self, symbol: str, effective_timeout: int
     ) -> AnalyzeOutcome:
+        try:
+            symbol = await self.resolve_index(symbol, effective_timeout)
+        except ValueError as exc:
+            return AnalyzeOutcome(False, f"❌ {exc}")
         return await self._analyze(
             "/api/v1/index", symbol, effective_timeout, is_index=True
         )
+
+    async def resolve_index(self, symbol: str, timeout: int) -> str:
+        """通过主仓目录确认指数身份，只开放 A 股与港股，不自动刷新目录。"""
+        symbol = canonical_symbol("index", symbol)
+        if re.fullmatch(r"\d{6}", symbol):
+            return symbol
+        if symbol == "HSTECH":
+            symbol = "HSI:02083.00"
+        try:
+            response = await self._http.get(
+                f"{self._base_url}/api/v1/indices", params={"q": symbol}, timeout=timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("指数目录查询失败：%s", redact(str(exc)))
+            raise ValueError("指数目录暂不可用，请稍后重试。") from exc
+        entries = payload.get("indices", []) if isinstance(payload, dict) else []
+        entries = [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+        exact = []
+        for entry in entries:
+            aliases = entry.get("aliases")
+            names = [entry.get("symbol", ""), entry.get("name", "")]
+            if isinstance(aliases, list):
+                names.extend(aliases)
+            if any(symbol.casefold() == str(name).casefold() for name in names):
+                exact.append(entry)
+        candidates = exact or entries
+        # 旧别名与官方价格指数去重，总收益指数保持独立身份。
+        unique = {}
+        for entry in candidates:
+            code = str(entry.get("symbol", ""))
+            unique.setdefault(canonical_symbol("index", code), entry)
+        if len(unique) != 1:
+            choices = "、".join(str(entry.get("symbol", "")) for entry in list(unique.values())[:5])
+            raise ValueError(f"指数名称有歧义，请选择具体代码：{choices}" if unique else
+                             "指数未在服务目录中，请在服务 Web 刷新港股指数目录后重试。")
+        entry = next(iter(unique.values()))
+        if entry.get("market") not in {"hk", "a-shares"}:
+            raise ValueError("本版插件仅支持 A 股和港股指数，美股指数暂未开放。")
+        return str(entry["symbol"])
 
     async def analyze_gold(self, effective_timeout: int) -> AnalyzeOutcome:
         """生成黄金简报，直接返回本次请求对应的 Markdown。"""
@@ -150,6 +196,11 @@ class StockRobotClient:
         self, kind: ReportKind, query: str, effective_timeout: int
     ) -> str | None:
         """定位最新一条报告（报告库按时间倒序，取第一条）；失败返回 None。"""
+        if kind == "index":
+            try:
+                query = await self.resolve_index(query, effective_timeout)
+            except ValueError:
+                return None
         try:
             resp = await self._http.get(
                 f"{self._base_url}/api/v1/reports",
@@ -191,6 +242,11 @@ class StockRobotClient:
         self, kind: ReportKind, query: str, effective_timeout: int
     ) -> ReportRef | None:
         """定位最新一条报告（报告库按时间倒序，取第一条）；失败返回 None。"""
+        if kind == "index":
+            try:
+                query = await self.resolve_index(query, effective_timeout)
+            except ValueError:
+                return None
         try:
             resp = await self._http.get(
                 f"{self._base_url}/api/v1/reports",
@@ -286,7 +342,8 @@ class StockRobotClient:
             if is_index:
                 return AnalyzeOutcome(
                     False,
-                    f"❌ 无法识别指数代码 {symbol}，请提供 6 位指数代码（如 000300、399006）",
+                    f"❌ 无法识别指数 {symbol}，请提供 A 股六位指数代码或主仓目录中的港股指数代码。"
+                    + public_error_detail(self._error_detail(resp)),
                 )
             return AnalyzeOutcome(
                 False,

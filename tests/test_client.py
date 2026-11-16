@@ -622,9 +622,9 @@ def test_analyze_index_invalid_symbol_422():
     respx.post(f"{BASE}/api/v1/index").mock(
         return_value=httpx.Response(422, json={"detail": "无效的指数代码"})
     )
-    outcome = run(call_index("abc"))
+    outcome = run(call_index("999999"))
     assert outcome.ok is False
-    assert "6 位指数代码" in outcome.user_message
+    assert "A 股六位指数代码" in outcome.user_message
 
 
 @respx.mock
@@ -1246,3 +1246,64 @@ def test_release_binding_and_us_tool_contract_match_current_core(plugin_main):
     assert "四维均计分且充分" in description
     assert "缺项保留 N/A" in description
     assert "不含行业同行对比" not in description
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_hk_index_catalog_analysis_and_report_identity():
+    catalog = respx.get(f"{BASE}/api/v1/indices").mock(return_value=httpx.Response(200, json={
+        "indices": [{"symbol": "HSI:01067.00", "name": "恒生高股息率指数", "market": "hk"}],
+    }))
+    post = respx.post(f"{BASE}/api/v1/index").mock(return_value=httpx.Response(200, json={"reports": [{"code": "HSI:01067.00"}]}))
+    reports = respx.get(f"{BASE}/api/v1/reports").mock(return_value=httpx.Response(200, json={
+        "reports": [{"id": "report", "generated_at": 123.0}],
+    }))
+    client = StockRobotClient(BASE)
+    try:
+        assert (await client.analyze_index("恒生高股息率指数", 10)).ok
+        assert b'HSI:01067.00' in post.calls[0].request.content
+        assert await client.latest_report_id("index", "恒生高股息率指数", 10) == "report"
+        assert (await client.latest_report("index", "恒生高股息率指数", 10)).id == "report"
+        assert all(call.request.url.params["query"] == "HSI:01067.00" for call in reports.calls)
+        assert catalog.call_count == 3
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entries,detail", [
+    ([], "刷新港股指数目录"),
+    ([{"symbol": "SPX", "name": "标普500", "market": "us"}], "美股指数暂未开放"),
+    ([{"symbol": "HSI:01067.00", "market": "hk"}, {"symbol": "HSI:11067.00", "market": "hk"}], "有歧义"),
+])
+async def test_index_catalog_refuses_missing_ambiguous_and_us(entries, detail):
+    respx.get(f"{BASE}/api/v1/indices").mock(return_value=httpx.Response(200, json={"indices": entries}))
+    post = respx.post(f"{BASE}/api/v1/index")
+    result = await call_index("测试指数")
+    assert not result.ok and detail in result.user_message
+    assert not post.called
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_hk_tech_alias_resolves_official_catalog_identity():
+    route = respx.get(f"{BASE}/api/v1/indices").mock(return_value=httpx.Response(200, json={
+        "indices": [{"symbol": "HSI:02083.00", "name": "恒生科技指数", "market": "hk"}],
+    }))
+    client = StockRobotClient(BASE)
+    try:
+        assert await client.resolve_index("HSTECH", 10) == "HSI:02083.00"
+        assert route.calls[0].request.url.params["q"] == "HSI:02083.00"
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_unavailable_index_catalog_never_submits_analysis():
+    respx.get(f"{BASE}/api/v1/indices").mock(side_effect=httpx.ConnectError("offline"))
+    post = respx.post(f"{BASE}/api/v1/index")
+    result = await call_index("HSI:01067.00")
+    assert not result.ok and "目录暂不可用" in result.user_message
+    assert not post.called

@@ -38,6 +38,15 @@ def completed(store, state="success", markdown="完整中文\n报告\n", image=T
     return store.root / task
 
 
+def test_hk_official_identity_is_safe_in_local_report_filename(store):
+    task = store.begin("# 港股指数完整报告", "HSI:01067.00", "index")
+    directory = store.root / task
+    files = list(directory.glob("*.md"))
+    assert len(files) == 1
+    assert ":" not in files[0].name
+    assert files[0].read_text(encoding="utf-8") == "# 港股指数完整报告"
+
+
 def test_queued_delivery_removes_report_and_diagnostic_after_72_hours(store):
     task = store.begin("等待报告", "00700.HK", "stock")
     store.finish(task, None, "failed", "queued_delivery", "TimeoutError")
