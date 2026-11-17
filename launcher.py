@@ -58,6 +58,20 @@ async def probe_health(base_url: str) -> bool:
     return isinstance(payload, dict) and payload.get("status") == "ok"
 
 
+async def probe_service_version(base_url: str) -> str | None:
+    """读取真实健康版本；无法确认版本时不视作绑定版本。"""
+    try:
+        async with httpx.AsyncClient(timeout=2) as client:
+            response = await client.get(f"{base_url.rstrip('/')}/health")
+        payload = response.json() if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        return None
+    version = payload.get("version")
+    return version.strip() if isinstance(version, str) and version.strip() else None
+
+
 class ServiceLauncher:
     def __init__(
         self,
@@ -268,10 +282,25 @@ class ServiceLauncher:
             if self._stopped:
                 return ReadyOutcome(False, "插件已停用")
             if await probe_health(self.base_url):
-                self._state = "ready"
-                self._reason = ""
-                await self._cleanup_runtimes(legacy=False)
-                return ReadyOutcome(True)
+                reusable = True
+                if self.managed_release_tag is not None and self.archive_url is None:
+                    expected = self.managed_release_tag.removeprefix("v")
+                    actual = await probe_service_version(self.base_url)
+                    if actual != expected:
+                        if actual is None or self._process is None or self._process.returncode is not None:
+                            return self._failure(
+                                f"当前分析服务版本为 {actual or '未知'}，插件绑定要求 {expected}；"
+                                "未复用或终止来源未确认的服务，请停止旧服务后重载插件。"
+                            )
+                        # 只回收本启动器创建的进程，随后走既有候选升级/回滚流程。
+                        logger.warning("自建服务版本 %s 与绑定 %s 不一致，准备升级", actual, expected)
+                        await self._cleanup_process()
+                        reusable = False
+                if reusable:
+                    self._state = "ready"
+                    self._reason = ""
+                    await self._cleanup_runtimes(legacy=False)
+                    return ReadyOutcome(True)
             if not self._can_start or not self.auto_install:
                 return self._failure(
                     "分析服务未启动，此地址或配置仅允许复用正在运行的服务"
