@@ -653,3 +653,62 @@ async def test_reused_health_cannot_confirm_or_prune_unowned_upgrade(tmp_path, m
     finally:
         holder.close()
         await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('actual', ['0.4.0', None])
+async def test_healthy_unowned_wrong_version_is_not_reused_or_cleaned(tmp_path, monkeypatch, actual):
+    from unittest.mock import AsyncMock
+    service = make_launcher(tmp_path, managed_release_tag='v0.4.1')
+    monkeypatch.setattr(launcher, 'probe_health', AsyncMock(return_value=True))
+    monkeypatch.setattr(launcher, 'probe_service_version', AsyncMock(return_value=actual), raising=False)
+    cleanup = AsyncMock()
+    monkeypatch.setattr(service, '_cleanup_runtimes', cleanup)
+    result = await service._prepare(allow_install=True)
+    assert not result.ok
+    assert '0.4.1' in result.reason
+    cleanup.assert_not_awaited()
+    assert service._process is None
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_healthy_pinned_version_can_be_reused(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    service = make_launcher(tmp_path, managed_release_tag='v0.4.1')
+    monkeypatch.setattr(launcher, 'probe_health', AsyncMock(return_value=True))
+    monkeypatch.setattr(launcher, 'probe_service_version', AsyncMock(return_value='0.4.1'), raising=False)
+    monkeypatch.setattr(service, '_cleanup_runtimes', AsyncMock())
+    assert (await service._prepare(allow_install=True)).ok
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_owned_healthy_old_service_enters_existing_upgrade_flow(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    service = make_launcher(tmp_path, managed_release_tag='v0.4.1')
+    old = FakeProcess()
+    service._process = old
+    monkeypatch.setattr(launcher, 'probe_health', AsyncMock(return_value=True))
+    monkeypatch.setattr(launcher, 'probe_service_version', AsyncMock(return_value='0.4.0'))
+    monkeypatch.setattr(launcher, 'instance_ready', lambda *_: True)
+    monkeypatch.setattr(launcher, 'source_matches_release', lambda *_: False)
+    install = AsyncMock(return_value=launcher.StepResult(True))
+    monkeypatch.setattr(launcher, 'ensure_instance', install)
+    monkeypatch.setattr(service, '_configure', AsyncMock(return_value=launcher.StepResult(True)))
+    monkeypatch.setattr(service, '_start', AsyncMock(return_value=launcher.ReadyOutcome(True)))
+    monkeypatch.setattr(service, '_cleanup_runtimes', AsyncMock())
+    try:
+        assert (await service._prepare(allow_install=True)).ok
+        assert old.terminated == 1
+        assert install.await_args.kwargs['expected_release_tag'] == 'v0.4.1'
+    finally:
+        await service.stop()
+
+
+@respx.mock
+@pytest.mark.asyncio
+@pytest.mark.parametrize('payload,expected', [({'status':'ok','version':'0.4.1'},'0.4.1'),({'status':'ok','version':'0.4.0'},'0.4.0'),({'status':'ok'},None),({'status':'failed','version':'0.4.1'},None),({'status':'ok','version':123},None)])
+async def test_probe_reads_actual_service_version(payload, expected):
+    respx.get('http://127.0.0.1:25618/health').respond(200,json=payload)
+    assert await launcher.probe_service_version('http://127.0.0.1:25618') == expected
