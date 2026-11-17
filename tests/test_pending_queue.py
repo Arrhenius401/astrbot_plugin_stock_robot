@@ -158,19 +158,31 @@ def test_canonical_symbol_rejects_malformed_us_code():
 
 
 @pytest.mark.parametrize(("raw", "expected"), [
-    ("恒生指数", "HSI"), ("hsi:00001.00", "HSI"),
-    ("恒生中国企业指数", "HSCEI"), ("HSI:00014.00", "HSCEI"),
-    ("HSI:02083.00", "HSTECH"), ("HSI:01067.00", "HSI:01067.00"),
+    ("恒生指数", "恒生指数"), ("hsi:00001.00", "HSI:00001.00"),
+    ("恒生中国企业指数", "恒生中国企业指数"), ("HSI:00014.00", "HSI:00014.00"),
+    ("HSI:02083.00", "HSI:02083.00"), ("HSI:01067.00", "HSI:01067.00"),
     ("恒生高股息", "恒生高股息"), ("sh000300", "000300"),
 ])
 def test_hk_index_identity(raw, expected):
     assert pending.canonical_symbol("index", raw) == expected
 
 
-def test_hk_queue_merges_price_alias_but_preserves_total_return(tmp_path):
+def test_hk_queue_without_cache_preserves_queries_and_versions(tmp_path):
     queue = pending.PendingQueue(tmp_path / "waiting.sqlite3")
     for symbol in ("恒生指数", "HSI:00001.00", "HSI:10068.00"):
         queue.enqueue("group", "index", symbol)
     assert queue.get("group")["targets"] == [
-        {"kind": "index", "symbol": "HSI"}, {"kind": "index", "symbol": "HSI:10068.00"},
+        {"kind": "index", "symbol": "恒生指数"},
+        {"kind": "index", "symbol": "HSI:00001.00"},
+        {"kind": "index", "symbol": "HSI:10068.00"},
     ]
+
+
+def test_cached_queue_uses_official_identity_without_losing_query(tmp_path):
+    queue = pending.PendingQueue(tmp_path / 'waiting.sqlite3')
+    for symbol in ('HSTECH','HSTECH.HK'):
+        queue.enqueue('group','index',symbol,official_symbol='HSI:02083.00')
+    targets = queue.get('group')['targets']
+    assert len(targets) == 1
+    assert targets[0]['symbol'] == targets[0]['official_symbol'] == 'HSI:02083.00'
+    assert targets[0]['query'] == 'HSTECH'

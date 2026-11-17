@@ -12,6 +12,7 @@ import httpx
 import pytest
 import respx
 from stock_robot_plugin_test.client import (
+    ResolvedIndex,
     StockRobotClient,
     progress_message,
     public_error_detail,
@@ -311,6 +312,7 @@ async def test_ready_analysis_sends_only_one_progress_message(plugin_main, kind,
     analyze = AsyncMock(return_value=SimpleNamespace(ok=True))
     plugin._client.analyze_stock = analyze
     plugin._client.analyze_index = analyze
+    plugin._client.resolve_index = AsyncMock(return_value=ResolvedIndex(symbol, symbol, "a-shares", "price"))
     plugin._client.latest_report_id = AsyncMock(return_value="report")
     plugin._client.download_report = AsyncMock(return_value="# 报告")
     try:
@@ -320,7 +322,8 @@ async def test_ready_analysis_sends_only_one_progress_message(plugin_main, kind,
         assert markdown == "# 报告"
         analyze.assert_awaited_once()
         actual_symbol, timeout = analyze.await_args.args
-        assert actual_symbol == symbol and 0 < timeout <= 95
+        assert (actual_symbol.symbol if kind == "index" else actual_symbol) == symbol
+        assert 0 < timeout <= 95
         event.send.assert_awaited_once_with(progress_message(symbol))
         plugin._launcher.ensure_ready.assert_awaited_once()
     finally:
@@ -591,7 +594,7 @@ def test_analyze_stock_malformed_body():
 async def call_index(symbol: str, timeout: int = 100):
     client = StockRobotClient(BASE, timeout)
     try:
-        return await client.analyze_index(symbol, timeout)
+        return await client.analyze_index(ResolvedIndex(symbol, symbol, "a-shares", "price"), timeout)
     finally:
         await client.aclose()
 
@@ -1248,62 +1251,44 @@ def test_release_binding_and_us_tool_contract_match_current_core(plugin_main):
     assert "不含行业同行对比" not in description
 
 
-@respx.mock
 @pytest.mark.asyncio
-async def test_hk_index_catalog_analysis_and_report_identity():
-    catalog = respx.get(f"{BASE}/api/v1/indices").mock(return_value=httpx.Response(200, json={
-        "indices": [{"symbol": "HSI:01067.00", "name": "恒生高股息率指数", "market": "hk"}],
-    }))
-    post = respx.post(f"{BASE}/api/v1/index").mock(return_value=httpx.Response(200, json={"reports": [{"code": "HSI:01067.00"}]}))
-    reports = respx.get(f"{BASE}/api/v1/reports").mock(return_value=httpx.Response(200, json={
-        "reports": [{"id": "report", "generated_at": 123.0}],
-    }))
-    client = StockRobotClient(BASE)
+@pytest.mark.parametrize('kind,symbol,expected', [('stock','513130','ETF/基金'),('index','00700.HK','港股个股'),('index','513130','ETF'),('index','测试ETF','ETF'),('stock','HSTECH.HK','指数标识'),('stock','SH513130','ETF/基金'),('index','ＳＨ５１３１３０','ETF'),('index','００７００．ＨＫ','港股个股')])
+async def test_tool_misuse_only_corrects_model(plugin_main, kind, symbol, expected):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._run_analysis = AsyncMock()
+    plugin._client._resolve_payload = AsyncMock(return_value={"status":"ok","entry":{"symbol":"HSI:02083.00","name":"恒生科技指数","aliases":["HSTECH"]}})
+    event = SimpleNamespace(send=AsyncMock())
     try:
-        assert (await client.analyze_index("恒生高股息率指数", 10)).ok
-        assert b'HSI:01067.00' in post.calls[0].request.content
-        assert await client.latest_report_id("index", "恒生高股息率指数", 10) == "report"
-        assert (await client.latest_report("index", "恒生高股息率指数", 10)).id == "report"
-        assert all(call.request.url.params["query"] == "HSI:01067.00" for call in reports.calls)
-        assert catalog.call_count == 3
+        result = await getattr(plugin, 'analyze_' + kind)(event,symbol)
+        assert expected in result
+        plugin._run_analysis.assert_not_awaited()
+        event.send.assert_not_awaited()
     finally:
-        await client.aclose()
+        await plugin._client.aclose()
 
 
-@respx.mock
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entries,detail", [
-    ([], "刷新港股指数目录"),
-    ([{"symbol": "SPX", "name": "标普500", "market": "us"}], "美股指数暂未开放"),
-    ([{"symbol": "HSI:01067.00", "market": "hk"}, {"symbol": "HSI:11067.00", "market": "hk"}], "有歧义"),
-])
-async def test_index_catalog_refuses_missing_ambiguous_and_us(entries, detail):
-    respx.get(f"{BASE}/api/v1/indices").mock(return_value=httpx.Response(200, json={"indices": entries}))
-    post = respx.post(f"{BASE}/api/v1/index")
-    result = await call_index("测试指数")
-    assert not result.ok and detail in result.user_message
-    assert not post.called
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_hk_tech_alias_resolves_official_catalog_identity():
-    route = respx.get(f"{BASE}/api/v1/indices").mock(return_value=httpx.Response(200, json={
-        "indices": [{"symbol": "HSI:02083.00", "name": "恒生科技指数", "market": "hk"}],
-    }))
-    client = StockRobotClient(BASE)
+async def test_restored_queue_merges_official_identity_and_preserves_version(plugin_main):
+    plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
+    plugin._launcher = None
+    for symbol in ('HSTECH','HSTECH.HK','恒生科技','HSTECH NTRI'):
+        plugin._pending.enqueue('group','index',symbol)
+    record = plugin._pending.get('group')
+    plugin._pending.asked('group',record['id'],'继续吗？',now=10)
+    accepted = plugin._pending.confirm('group',record['id'],now=11)
+    async def resolve(query,timeout):
+        net = query == 'HSTECH NTRI'
+        return ResolvedIndex('HSI:22083.00' if net else 'HSI:02083.00','测试指数','hk','net_total_return' if net else 'price')
+    plugin._client.resolve_index = AsyncMock(side_effect=resolve)
+    calls = []
+    async def analyze(event,kind,symbol,note,**kwargs):
+        calls.append(symbol)
+        assert kwargs['step']['resolved_index']['symbol'] == symbol
+        kwargs['step']['state'] = 'done'
+        plugin._pending.save_accepted(kwargs['record'])
+    plugin._run_analysis = analyze
     try:
-        assert await client.resolve_index("HSTECH", 10) == "HSI:02083.00"
-        assert route.calls[0].request.url.params["q"] == "HSI:02083.00"
+        await plugin._run_confirmed_batch(SimpleNamespace(send=AsyncMock()),accepted)
+        assert calls == ['HSI:02083.00','HSI:22083.00']
     finally:
-        await client.aclose()
-
-
-@respx.mock
-@pytest.mark.asyncio
-async def test_unavailable_index_catalog_never_submits_analysis():
-    respx.get(f"{BASE}/api/v1/indices").mock(side_effect=httpx.ConnectError("offline"))
-    post = respx.post(f"{BASE}/api/v1/index")
-    result = await call_index("HSI:01067.00")
-    assert not result.ok and "目录暂不可用" in result.user_message
-    assert not post.called
+        await plugin._client.aclose()

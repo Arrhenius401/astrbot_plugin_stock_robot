@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import time
+import unicodedata
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -28,6 +29,24 @@ def _us_symbol(value: str) -> str | None:
     return candidate
 
 
+def normalize_index_query(raw: str) -> str:
+    """只规范格式；官方身份由服务解析。"""
+    value = unicodedata.normalize("NFKC", raw).strip().upper().replace("—", "-")
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"\.(?:HK|SH|SZ|US|INDEX)$", "", value)
+    match = re.fullmatch(r"HSI:(\d{1,5})(\.\d{2})?", value)
+    if match:
+        return "HSI:" + match[1].zfill(5) + (match[2] or ".00")
+    match = re.fullmatch(r"(?:SH|SZ)(\d{1,6})", value)
+    if match:
+        value = match[1].zfill(6)
+    elif value.isdigit() and len(value) < 5:
+        value = value.zfill(6)
+    if not value or len(value) > 128 or any(char in value for char in "\\/\x00"):
+        raise ValueError("指数查询格式无效")
+    return value
+
+
 def canonical_symbol(kind: str, raw: str) -> str:
     """合并同一港股/美股的常用写法，并固定黄金市场简报的内部身份。"""
     value = raw.strip().upper()
@@ -38,17 +57,7 @@ def canonical_symbol(kind: str, raw: str) -> str:
     if kind not in {"stock", "index"}:
         raise ValueError("未知分析类型")
     if kind == "index":
-        aliases = {
-            "恒生指数": "HSI", "恒指": "HSI", "HSI:00001.00": "HSI",
-            "恒生中国企业指数": "HSCEI", "恒生国企指数": "HSCEI", "国企指数": "HSCEI",
-            "HSI:00014.00": "HSCEI", "恒生科技指数": "HSTECH", "恒生科技": "HSTECH",
-            "HSI:02083.00": "HSTECH",
-        }
-        value = aliases.get(value, value)
-        # 名称由主仓目录消歧；官方指数身份保留冒号，不能作为文件路径使用。
-        if (re.fullmatch(r"HSI:\d{5}\.\d{2}|[\u4e00-\u9fffA-Z0-9._ -]{1,64}", value)
-                and not re.fullmatch(r"(?:SH|SZ)?\d{6}", value)):
-            return value
+        return normalize_index_query(raw)
     if kind == "stock":
         hk = re.fullmatch(r"(?:HK)?(\d{5})(?:\.HK)?", value)
         if hk:
@@ -131,13 +140,18 @@ class PendingQueue:
             else:
                 conn.execute("DELETE FROM accepted WHERE id=?", (record_id,))
 
-    def enqueue(self, umo: str, kind: str, symbol: str) -> dict[str, str] | None:
-        target = {"kind": kind, "symbol": canonical_symbol(kind, symbol)}
+    def enqueue(self, umo: str, kind: str, symbol: str, *, official_symbol: str | None = None) -> dict[str, str] | None:
+        target = {"kind": kind, "symbol": official_symbol or canonical_symbol(kind, symbol)}
+        if kind == "index" and official_symbol:
+            target["query"] = canonical_symbol(kind, symbol)
+            if official_symbol:
+                target["official_symbol"] = official_symbol
         if not umo:
             raise ValueError("会话不能为空")
         with self._transaction() as conn:
             old = self._get(conn, umo)
-            targets = [item for item in old["targets"] if item != target] if old else []
+            targets = [item for item in old["targets"] if (item["kind"], item["symbol"]) !=
+                       (target["kind"], target["symbol"])] if old else []
             targets.append(target)
             evicted = targets.pop(0) if len(targets) > MAX_TARGETS else None
             # 新积压请求使未投递的旧询问失效；只有新询问发送成功才开始计时。

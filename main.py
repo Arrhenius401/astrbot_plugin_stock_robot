@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import math
+import re
 import time
 from copy import copy
 from functools import partial
@@ -24,7 +25,9 @@ from .bootstrap import (
 )
 from .client import (
     DEFAULT_TIMEOUT_SECONDS,
+    IndexResolveError,
     ReportKind,
+    ResolvedIndex,
     StockRobotClient,
     progress_message,
     public_error_detail,
@@ -33,7 +36,7 @@ from .client import (
 from .disk_support import FileLock
 from .font_support import ensure_chinese_font
 from .launcher import ServiceLauncher
-from .pending_queue import PendingQueue, canonical_symbol
+from .pending_queue import PendingQueue, canonical_symbol, normalize_index_query
 from .plugin_settings import migrate_port, resolve_legacy_extras
 from .report_delivery import ReportDelivery
 from .report_renderer import ReportRenderer
@@ -167,7 +170,7 @@ class StockRobotPlugin(Star):
         )
         if not math.isfinite(self._install_timeout) or self._install_timeout <= 0:
             raise ValueError("install_timeout_seconds 必须为大于 0 的有限秒数")
-        self._client = StockRobotClient(base_url, self._timeout_seconds)
+        self._client = StockRobotClient(base_url, self._timeout_seconds, cache_path=data_dir / "index-identities.json")
         self._pending = PendingQueue(data_dir / "waiting.sqlite3")
         self._waiting_lock = FileLock(data_dir / "waiting-worker.lock")
         self._waiting_task: asyncio.Task | None = None
@@ -375,6 +378,26 @@ class StockRobotPlugin(Star):
                 return
             record = latest
             steps = record.setdefault("steps", [dict(item, state="waiting") for item in record["targets"]])
+            # 仅合并尚未开始的指数任务，已有报告和不确定执行记录不重跑。
+            from dataclasses import asdict
+            prepared = []
+            seen = set()
+            for step in steps:
+                if step["kind"] == "index" and step["state"] == "waiting":
+                    try:
+                        resolved = (ResolvedIndex(**step["resolved_index"]) if step.get("resolved_index") else
+                                    await self._client.resolve_index(step.get("query", step["symbol"]), self._timeout_seconds))
+                    except IndexResolveError as error:
+                        step.update(state="failed", error=error.code)
+                        await event.send(event.plain_result(error.user_message))
+                    else:
+                        step.update(symbol=resolved.symbol, official_symbol=resolved.symbol,
+                                    resolved_index=asdict(resolved))
+                identity = (step["kind"], step["symbol"])
+                if identity not in seen or step["state"] != "waiting":
+                    prepared.append(step)
+                    seen.add(identity)
+            record["steps"] = steps = prepared
             self._pending.save_accepted(record)
             for step in steps:
                 if step["state"] in {"done", "failed"}:
@@ -480,13 +503,20 @@ class StockRobotPlugin(Star):
     async def analyze_stock(self, event: AstrMessageEvent, symbol: str):
         """分析一只 A 股、港股或美股个股，并把完整研报以图片发送给用户。
 
-        当用户询问某只 A 股、港股或美股个股的分析、评价、是否值得关注或买入时使用。
+        仅用于个股。指数、ETF/基金请求不要使用本工具。
+        不得把指数替换为 ETF、成分股或其他个股；ETF 自身表现不适用。
+        失败原因原样转述，不用其他标的替代。
         默认提供客观数据；开启额外分析后，美股支持已核实的 TTM 同行经营比较、有效维度评分与 AI 解读。
         美股仅在财务、技术、估值和行业四维均计分且充分时生成规则信号；缺项保留 N/A，不提供仓位或买卖动作。
 
         Args:
             symbol(string): A 股 6 位代码、港股 5 位代码或美股字母代码，例如 600519、00700.HK、AAPL、MSFT、BRK.B
         """
+        value = normalize_index_query(symbol)
+        if re.fullmatch(r"(?:5\d{5}|1[56]\d{4})(?:\.(?:SH|SZ))?", value):
+            return "这是 ETF/基金代码，本工具不分析 ETF 自身表现；未执行分析。请保留用户标的类型，不得替代。"
+        if await self._client.is_index_identifier(symbol):
+            return "这是指数标识，未按个股分析；如用户问指数，请用指数工具并保留原词。"
         note: list[str] = []
         await self._run_analysis(event, "stock", symbol, note)
         return note[-1] if note else "流程已结束。只回一句简短确认，不要再调用工具。"
@@ -495,11 +525,20 @@ class StockRobotPlugin(Star):
     async def analyze_index(self, event: AstrMessageEvent, symbol: str):
         """分析一个 A 股或港股指数，并把完整研报以图片发送给用户。
 
-        当用户询问 A 股或港股指数的走势与估值时使用。美股指数暂未开放。
+        仅用于指数走势、估值或表现。优先官方指数名称或代码；不要追加市场后缀、猜代码，
+        不要用 ETF、成分股或其他指数替代。不确定时传用户原词，由服务解析。
+        歧义时请用户选择，不得代选。ETF 自身表现不能用跟踪指数报告代替。
+        美股指数暂未开放。失败原因原样转述，不得扩展为指数不存在或建议替代标的。
 
         Args:
             symbol(string): A 股六位指数代码，或主仓目录中已核验的港股指数代码、明确名称；名称歧义时请用户选择具体代码。
         """
+        value = normalize_index_query(symbol)
+        if re.fullmatch(r"\d{5}(?:\.HK)?", value):
+            return "这是港股个股代码，请用个股工具；未执行分析。"
+        if (re.fullmatch(r"(?:5\d{5}|1[56]\d{4})(?:\.(?:SH|SZ))?", value)
+                or value.endswith(("ETF", "基金"))):
+            return "ETF 自身表现不能用指数报告代替；未执行分析，不得自动改路由。"
         note: list[str] = []
         await self._run_analysis(event, "index", symbol, note)
         return note[-1] if note else "流程已结束。只回一句简短确认，不要再调用工具。"
@@ -583,7 +622,9 @@ class StockRobotPlugin(Star):
                 self._pending.discard(umo)
             if (self._launcher is not None
                     and getattr(self._launcher, "state", "ready") in {"idle", "starting"}):
-                evicted = self._pending.enqueue(umo, kind, symbol)
+                cached = self._client.cached_index(symbol) if kind == "index" else None
+                evicted = self._pending.enqueue(umo, kind, symbol,
+                                               official_symbol=cached)
                 detail = f"；已替换最早的 {evicted['symbol']}" if evicted else ""
                 note.append("服务暂不可用，已加入本会话的等待队列" + detail
                             + "。恢复后会统一询问是否仍需分析，尚未开始分析。请自然告知用户。")
@@ -609,6 +650,16 @@ class StockRobotPlugin(Star):
         if task is not None and not from_queue:
             self._analysis_tasks.add(task)
         started_at = time.time()
+        identity_confirmed = kind != "index"
+
+        def resolved_identity(value):
+            nonlocal symbol, identity_confirmed
+            symbol = value
+            identity_confirmed = True
+            if step is not None:
+                step.update(symbol=value, official_symbol=value)
+                self._pending.save_accepted(record)
+
         logger.info(
             "开始分析: kind=%s symbol=%s effective_timeout=%s",
             kind,
@@ -620,7 +671,8 @@ class StockRobotPlugin(Star):
                 # 同一标的的分析与取报告互斥，避免取到另一次调用的“最新报告”。
                 async with lock:
                     markdown = await self._perform_analysis(
-                        event, kind, symbol, note, deadline, started_at=started_at
+                        event, kind, symbol, note, deadline, started_at=started_at, on_resolved=resolved_identity,
+                        resolved_index=ResolvedIndex(**step["resolved_index"]) if step and step.get("resolved_index") else None
                     )
             if markdown is not None:
                 logger.info(
@@ -643,11 +695,11 @@ class StockRobotPlugin(Star):
                     "不要复述报告内容，不要再调用工具。"
                 )
         except asyncio.CancelledError:
-            if not self._stopping and kind in {"stock", "index"}:
+            if not self._stopping and identity_confirmed and kind in {"stock", "index"}:
                 self._schedule_late_report(event, kind, symbol, started_at)
             raise
         except (AnalysisStillRunning, TimeoutError):
-            if kind in {"stock", "index"}:
+            if identity_confirmed and kind in {"stock", "index"}:
                 await self._late_notice(
                     event,
                     "⏱️ 分析超过等待时间，已转入后台继续；完成后会自动补发报告。",
@@ -689,7 +741,7 @@ class StockRobotPlugin(Star):
         symbol: str,
         note: list[str],
         deadline: float,
-        *, started_at: float | None = None,
+        *, started_at: float | None = None, on_resolved=None, resolved_index=None,
     ) -> str | None:
         """执行分析流程：进度 → 分析 → 报告取回；成功返回完整原文。
 
@@ -733,7 +785,16 @@ class StockRobotPlugin(Star):
         if kind == "stock":
             outcome = await self._client.analyze_stock(symbol, effective_timeout)
         elif kind == "index":
-            outcome = await self._client.analyze_index(symbol, effective_timeout)
+            try:
+                resolved = resolved_index or await self._client.resolve_index(symbol, effective_timeout)
+            except IndexResolveError as error:
+                await event.send(event.plain_result(error.user_message))
+                note.append(error.model_note)
+                return None
+            symbol = resolved.symbol
+            if on_resolved is not None:
+                on_resolved(symbol)
+            outcome = await self._client.analyze_index(resolved, remaining())
         else:
             outcome = await self._client.analyze_gold(effective_timeout)
         if not outcome.ok:
@@ -744,9 +805,8 @@ class StockRobotPlugin(Star):
             ):
                 raise AnalysisStillRunning(started_at)
             await event.send(event.plain_result(outcome.user_message))
-            note.append(
-                "分析失败，原因已直接发给用户。只回一句简短确认，不要编造分析内容，不要再调用工具。"
-            )
+            note.append(getattr(outcome, "model_note", "") or
+                        "分析失败，原因已直接发给用户。只回简短确认，不得扩展或替代标的。")
             return
 
         if kind == "gold":

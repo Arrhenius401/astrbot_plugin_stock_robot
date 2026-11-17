@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
 import re
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 import httpx
 from astrbot.api import logger
 
 from .bootstrap import redact
-from .pending_queue import canonical_symbol
+from .pending_queue import normalize_index_query
 
 DEFAULT_BASE_URL = "http://127.0.0.1:25618"
 DEFAULT_TIMEOUT_SECONDS = 150
@@ -29,6 +33,28 @@ class AnalyzeOutcome:
     user_message: str = ""
     markdown: str = ""
     ambiguous: bool = False
+    model_note: str = ""
+    resolved_symbol: str = ""
+
+
+MODEL_NOTE = "只回简短确认，不得推断指数不存在，不得扩展或替换为 ETF、成分股或其他标的。"
+
+
+@dataclass(frozen=True)
+class ResolvedIndex:
+    symbol: str
+    name: str
+    market: str
+    return_type: str
+    aliases: tuple[str, ...] = ()
+
+
+class IndexResolveError(ValueError):
+    def __init__(self, code: str, user_message: str):
+        super().__init__(user_message)
+        self.code = code
+        self.user_message = user_message
+        self.model_note = MODEL_NOTE
 
 
 @dataclass(frozen=True)
@@ -75,10 +101,57 @@ class StockRobotClient:
     由调用方转换为用户可读消息。
     """
 
-    def __init__(self, base_url: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS):
+    def __init__(self, base_url: str, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS, *, cache_path: Path | None = None):
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
         self._http = httpx.AsyncClient()
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_after = 0.0
+        self._refresh_error: IndexResolveError | None = None
+        self._index_cache: dict[str, str] = {}
+        self._cache_path = cache_path
+        if cache_path is not None:
+            try:
+                rows = json.loads(cache_path.read_text(encoding="utf-8"))
+                for row in rows:
+                    symbol = row["symbol"]
+                    aliases = row["aliases"]
+                    if not isinstance(symbol, str) or not isinstance(aliases, list) or any(
+                            not isinstance(value, str) for value in aliases):
+                        raise ValueError("指数身份缓存结构无效")
+                    for value in (symbol, *aliases):
+                        self._index_cache[normalize_index_query(value)] = symbol
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                logger.debug("指数身份缓存不可用：%s", error)
+
+    def cached_index(self, query: str) -> str | None:
+        return self._index_cache.get(normalize_index_query(query))
+
+    def _remember(self, result: ResolvedIndex, *, persist: bool = True) -> None:
+        for value in (result.symbol, *result.aliases):
+            self._index_cache[normalize_index_query(value)] = result.symbol
+        if persist and self._cache_path is not None:
+            import os
+            import tempfile
+            temporary = None
+            try:
+                self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                        dir=self._cache_path.parent, delete=False) as file:
+                    temporary = file.name
+                    groups: dict[str, list[str]] = {}
+                    for alias, symbol in self._index_cache.items():
+                        aliases = groups.setdefault(symbol, [])
+                        if alias != normalize_index_query(symbol):
+                            aliases.append(alias)
+                    json.dump([{"symbol": symbol, "aliases": aliases} for symbol, aliases in groups.items()],
+                              file, ensure_ascii=False)
+                os.replace(temporary, self._cache_path)
+            except (OSError, ValueError, TypeError) as error:
+                logger.warning("指数身份缓存保存失败：%s", error)
+            finally:
+                if temporary is not None and os.path.exists(temporary):
+                    os.unlink(temporary)
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -109,57 +182,141 @@ class StockRobotClient:
             "/api/v1/analyze", symbol, effective_timeout, is_index=False
         )
 
-    async def analyze_index(
-        self, symbol: str, effective_timeout: int
-    ) -> AnalyzeOutcome:
+    async def analyze_index(self, symbol: str | ResolvedIndex, effective_timeout: int) -> AnalyzeOutcome:
+        deadline = time.monotonic() + effective_timeout
         try:
-            symbol = await self.resolve_index(symbol, effective_timeout)
-        except ValueError as exc:
-            return AnalyzeOutcome(False, f"❌ {exc}")
-        return await self._analyze(
-            "/api/v1/index", symbol, effective_timeout, is_index=True
-        )
+            resolved = symbol if isinstance(symbol, ResolvedIndex) else await self.resolve_index(symbol, effective_timeout)
+        except IndexResolveError as exc:
+            return AnalyzeOutcome(False, exc.user_message, model_note=exc.model_note)
+        outcome = await self._analyze("/api/v1/index", resolved.symbol,
+                                      max(1, int(deadline - time.monotonic())), is_index=True)
+        from dataclasses import replace
+        message = outcome.user_message
+        if not outcome.ok:
+            message = f"已确认指数身份 {resolved.symbol}（{resolved.name}），但行情/报告失败：{message}"
+        return replace(outcome, user_message=message, resolved_symbol=resolved.symbol,
+                       model_note=MODEL_NOTE if not outcome.ok else "")
 
-    async def resolve_index(self, symbol: str, timeout: int) -> str:
-        """通过主仓目录确认指数身份，只开放 A 股与港股，不自动刷新目录。"""
-        symbol = canonical_symbol("index", symbol)
-        if re.fullmatch(r"\d{6}", symbol):
-            return symbol
-        if symbol == "HSTECH":
-            symbol = "HSI:02083.00"
+    async def is_index_identifier(self, raw: str) -> bool:
+        query = normalize_index_query(raw)
+        # 六位数字与个股共用命名空间，不能据目录命中将个股请求改判为指数。
+        if re.fullmatch(r"\d{6}", query):
+            return False
+        if query.startswith("HSI:") or self.cached_index(query) is not None:
+            return True
         try:
-            response = await self._http.get(
-                f"{self._base_url}/api/v1/indices", params={"q": symbol}, timeout=timeout,
-            )
+            payload = await self._resolve_payload(query, 3)
+        except IndexResolveError:
+            return False
+        entry = payload.get("entry")
+        if payload["status"] != "ok" or not isinstance(entry, dict):
+            return False
+        aliases = entry.get("aliases", [])
+        if not isinstance(aliases, list):
+            return False
+        return query in {normalize_index_query(value) for value in
+                         (entry.get("symbol", ""), entry.get("name", ""),
+                          str(entry.get("name", "")).removesuffix("指数"), *aliases)
+                         if isinstance(value, str) and value}
+
+    async def _resolve_payload(self, query: str, timeout: float) -> dict:
+        try:
+            response = await self._http.get(f"{self._base_url}/api/v1/indices/resolve",
+                                            params={"q": query}, timeout=timeout)
+            if response.status_code in (404, 405):
+                raise IndexResolveError("upgrade", "当前服务不支持目录解析/刷新，请升级至绑定版本。")
             response.raise_for_status()
             payload = response.json()
+            if (not isinstance(payload, dict) or payload.get("status") not in
+                    {"ok", "ambiguous", "not_found"} or not isinstance(payload.get("catalog"), dict)):
+                raise ValueError("目录响应缺少协议字段")
+            catalog = payload["catalog"]
+            if (not all(isinstance(catalog.get(key), bool) for key in ("hsi_loaded", "hsi_aliases_loaded"))
+                    or "hsi_updated_at" not in catalog):
+                raise IndexResolveError("upgrade", "当前服务缺少目录解析字段，请升级至绑定版本。")
+            return payload
         except (httpx.HTTPError, ValueError) as exc:
-            logger.warning("指数目录查询失败：%s", redact(str(exc)))
-            raise ValueError("指数目录暂不可用，请稍后重试。") from exc
-        entries = payload.get("indices", []) if isinstance(payload, dict) else []
-        entries = [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
-        exact = []
-        for entry in entries:
-            aliases = entry.get("aliases")
-            names = [entry.get("symbol", ""), entry.get("name", "")]
-            if isinstance(aliases, list):
-                names.extend(aliases)
-            if any(symbol.casefold() == str(name).casefold() for name in names):
-                exact.append(entry)
-        candidates = exact or entries
-        # 旧别名与官方价格指数去重，总收益指数保持独立身份。
-        unique = {}
-        for entry in candidates:
-            code = str(entry.get("symbol", ""))
-            unique.setdefault(canonical_symbol("index", code), entry)
-        if len(unique) != 1:
-            choices = "、".join(str(entry.get("symbol", "")) for entry in list(unique.values())[:5])
-            raise ValueError(f"指数名称有歧义，请选择具体代码：{choices}" if unique else
-                             "指数未在服务目录中，请在服务 Web 刷新港股指数目录后重试。")
-        entry = next(iter(unique.values()))
-        if entry.get("market") not in {"hk", "a-shares"}:
-            raise ValueError("本版插件仅支持 A 股和港股指数，美股指数暂未开放。")
-        return str(entry["symbol"])
+            if isinstance(exc, IndexResolveError):
+                raise
+            raise IndexResolveError("unavailable", "指数目录服务暂不可用，未能确认身份；本次未生成报告。") from exc
+
+    def _resolved(self, payload: dict) -> ResolvedIndex | None:
+        if payload["status"] == "ambiguous":
+            candidates = payload.get("candidates", [])
+            choices = "、".join(f"{item.get('name')}（{item.get('symbol')}，{item.get('return_type')}）"
+                               for item in candidates if isinstance(item, dict))
+            raise IndexResolveError("ambiguous", f"指数名称有歧义，请选择具体代码：{choices}")
+        if payload["status"] != "ok":
+            return None
+        entry = payload.get("entry")
+        if not isinstance(entry, dict) or not all(isinstance(entry.get(key), str) and entry[key]
+                for key in ("symbol", "name", "market", "return_type")):
+            raise IndexResolveError("invalid", "当前服务缺少目录解析字段，请升级至绑定版本。")
+        if entry["market"] == "us":
+            raise IndexResolveError("market", "美股指数暂未开放。")
+        if entry["market"] not in {"hk", "a-shares"}:
+            raise IndexResolveError("market", "市场尚未核验，暂不可分析。")
+        aliases = entry.get("aliases", [])
+        if not isinstance(aliases, list) or any(not isinstance(value, str) for value in aliases):
+            raise IndexResolveError("invalid", "指数目录服务暂不可用，未能确认身份。")
+        result = ResolvedIndex(entry["symbol"], entry["name"], entry["market"], entry["return_type"], tuple(aliases))
+        self._remember(result)
+        return result
+
+    async def resolve_index(self, symbol: str, timeout: int) -> ResolvedIndex:
+        query = normalize_index_query(symbol)
+        deadline = time.monotonic() + timeout
+        payload = await self._resolve_payload(query, max(1, timeout))
+        resolved = self._resolved(payload)
+        if resolved is not None:
+            return resolved
+        catalog = payload["catalog"]
+        stamp = catalog.get("hsi_updated_at")
+        needs_refresh = (catalog.get("hsi_loaded") is not True or
+                         catalog.get("hsi_aliases_loaded") is not True or
+                         not isinstance(stamp, (int, float)) or time.time() - stamp > 7 * 86400)
+        if not needs_refresh:
+            raise IndexResolveError("not_found", "目录未收录该写法；无法确认官方身份。")
+        if deadline - time.monotonic() < 20:
+            raise IndexResolveError("budget", "本次时间不足，未刷新港股指数目录；本次未生成报告。")
+        async with self._refresh_lock:
+            payload = await self._resolve_payload(query, max(1, deadline - time.monotonic()))
+            resolved = self._resolved(payload)
+            if resolved is not None:
+                return resolved
+            if time.monotonic() < self._refresh_after:
+                if self._refresh_error:
+                    raise self._refresh_error
+                raise IndexResolveError("not_found", "已刷新目录，仍未收录该写法；本次未生成报告；这不等于指数不存在。")
+            if deadline - time.monotonic() < 20:
+                raise IndexResolveError("budget", "本次时间不足，未刷新港股指数目录。")
+            try:
+                response = await asyncio.wait_for(
+                    self._http.post(f"{self._base_url}/api/v1/indices/refresh",
+                                    params={"source": "hsi"}, timeout=12), timeout=12)
+                if response.status_code in (404, 405):
+                    raise IndexResolveError("upgrade", "当前服务不支持目录解析/刷新，请升级至绑定版本。")
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict) or data.get("state") != "live":
+                    raise IndexResolveError("refresh", "港股指数目录刷新失败，仍使用旧目录；未能确认身份。")
+            except (httpx.HTTPError, ValueError, TimeoutError) as exc:
+                error = (exc if isinstance(exc, IndexResolveError) else
+                         IndexResolveError("timeout", "刷新未在等待内完成，可能仍在后台更新。")
+                         if isinstance(exc, (httpx.TimeoutException, TimeoutError)) else
+                         IndexResolveError("refresh", "港股指数目录刷新失败，仍使用旧目录；未能确认身份。"))
+                self._refresh_after = time.monotonic() + 60
+                self._refresh_error = error
+                if error is exc:
+                    raise
+                raise error from exc
+            self._refresh_after = time.monotonic() + 600
+            self._refresh_error = None
+        payload = await self._resolve_payload(query, max(1, deadline - time.monotonic()))
+        resolved = self._resolved(payload)
+        if resolved is None:
+            raise IndexResolveError("not_found", "已刷新目录，仍未收录该写法；本次未生成报告；这不等于指数不存在。")
+        return resolved
 
     async def analyze_gold(self, effective_timeout: int) -> AnalyzeOutcome:
         """生成黄金简报，直接返回本次请求对应的 Markdown。"""
@@ -196,11 +353,6 @@ class StockRobotClient:
         self, kind: ReportKind, query: str, effective_timeout: int
     ) -> str | None:
         """定位最新一条报告（报告库按时间倒序，取第一条）；失败返回 None。"""
-        if kind == "index":
-            try:
-                query = await self.resolve_index(query, effective_timeout)
-            except ValueError:
-                return None
         try:
             resp = await self._http.get(
                 f"{self._base_url}/api/v1/reports",
@@ -242,11 +394,6 @@ class StockRobotClient:
         self, kind: ReportKind, query: str, effective_timeout: int
     ) -> ReportRef | None:
         """定位最新一条报告（报告库按时间倒序，取第一条）；失败返回 None。"""
-        if kind == "index":
-            try:
-                query = await self.resolve_index(query, effective_timeout)
-            except ValueError:
-                return None
         try:
             resp = await self._http.get(
                 f"{self._base_url}/api/v1/reports",

@@ -82,6 +82,9 @@ async def test_plugin_entry_creates_retained_report_and_stops_cleanly(plugin_mod
     assert plugin._storage.enabled
 
     class Client:
+        async def resolve_index(self, symbol, timeout):
+            return SimpleNamespace(symbol=symbol)
+
         closed = False
 
         async def analyze_index(self, *args):
@@ -131,6 +134,9 @@ async def test_uncertain_analysis_keeps_delivery_released(plugin_module, failure
     await plugin.initialize()
 
     class Client:
+        async def resolve_index(self, symbol, timeout):
+            return SimpleNamespace(symbol=symbol)
+
         async def analyze_index(self, *args):
             if failure == "timeout":
                 raise TimeoutError()
