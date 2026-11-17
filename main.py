@@ -753,7 +753,7 @@ class StockRobotPlugin(Star):
         def remaining() -> int:
             return max(1, int(deadline - asyncio.get_running_loop().time()))
 
-        message = ("⏳ 正在准备服务并分析黄金市场，请稍候。"
+        message = ("⏳ 正在分析黄金市场，请稍候。"
                    if kind == "gold" else progress_message(symbol))
         await event.send(event.plain_result(message))
 

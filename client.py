@@ -74,7 +74,7 @@ def resolve_effective_timeout(config_timeout: int, tool_timeout: int | None) -> 
 
 def progress_message(symbol: str) -> str:
     """提示服务准备和分析正在进行。"""
-    return f"⏳ 正在准备服务并分析 {symbol}，请稍候。首次分析通常需要 30～150 秒。"
+    return f"⏳ 正在分析 {symbol}，请稍候。首次分析通常需要 30～150 秒。"
 
 
 def public_error_detail(value: str) -> str:
