@@ -1243,8 +1243,8 @@ async def test_late_recovery(plugin_main, monkeypatch, mode):
 
 
 def test_release_binding_and_us_tool_contract_match_current_core(plugin_main):
-    assert plugin_main.MANAGED_RELEASE_TAG == "v0.4.3"
-    assert "version: 1.3.3" in Path(plugin_main.__file__).with_name("metadata.yaml").read_text(encoding="utf-8").splitlines()
+    assert plugin_main.MANAGED_RELEASE_TAG == "v0.4.4"
+    assert "version: 1.3.4" in Path(plugin_main.__file__).with_name("metadata.yaml").read_text(encoding="utf-8").splitlines()
     description = plugin_main.StockRobotPlugin.analyze_stock.__doc__ or ""
     assert "TTM 同行经营比较" in description
     assert "四维均计分且充分" in description
