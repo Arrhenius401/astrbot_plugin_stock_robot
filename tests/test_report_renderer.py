@@ -102,3 +102,17 @@ async def test_gold_width_reaches_native_renderer(tmp_path):
     result = await ReportRenderer(native).render("黄金原文", width=1200)
     assert result.width == 1200
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_superscripts_render_as_font_safe_matching_notes(tmp_path):
+    path = tmp_path / "report.png"
+    Image.new("RGB", (80, 100), "white").save(path)
+    original = "| 量比⁵ | PE⁶ | 分位¹⁰ |\n⁵ 说明\n⁶ 说明\n¹⁰ 说明"
+
+    async def native(markdown, return_url):
+        assert markdown == "| 量比[5] | PE[6] | 分位[10] |\n[5] 说明\n[6] 说明\n[10] 说明"
+        return str(path)
+
+    await ReportRenderer(native).render(original)
+    assert "分位¹⁰" in original

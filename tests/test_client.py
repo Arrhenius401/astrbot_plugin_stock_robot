@@ -1293,3 +1293,13 @@ async def test_restored_queue_merges_official_identity_and_preserves_version(plu
         assert calls == ['HSI:02083.00','HSI:22083.00']
     finally:
         await plugin._client.aclose()
+
+
+@respx.mock
+def test_stock_insufficient_history_keeps_backend_reason():
+    respx.post(f"{BASE}/api/v1/analyze").mock(return_value=httpx.Response(
+        422, json={"detail": "未取得足够的该美股行情，请核对代码或稍后重试"}))
+    outcome = run(call_stock("ANT"))
+    assert not outcome.ok
+    assert "未取得足够" in outcome.user_message
+    assert "无法识别代码" not in outcome.user_message

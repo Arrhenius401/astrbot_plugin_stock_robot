@@ -492,6 +492,9 @@ class StockRobotClient:
                     f"❌ 无法识别指数 {symbol}，请提供 A 股六位指数代码或主仓目录中的港股指数代码。"
                     + public_error_detail(self._error_detail(resp)),
                 )
+            detail = self._error_detail(resp)
+            if isinstance(detail, str) and detail.strip() and not detail.startswith("无效的股票代码"):
+                return AnalyzeOutcome(False, f"❌ 分析未完成 {symbol}：{public_error_detail(detail)}")
             return AnalyzeOutcome(
                 False,
                 f"❌ 无法识别代码 {symbol}，请提供 A 股 6 位代码（如 600519）、"

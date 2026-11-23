@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from io import BytesIO
@@ -26,7 +27,10 @@ class ReportRenderer:
 
     async def render(self, markdown: str, *, width: int = 800) -> RenderedReport:
         options = {"width": width} if width != 800 else {}
-        path = Path(await self.native_render(markdown, return_url=False, **options))
+        # 原生中文字体不覆盖全部 Unicode 上标，图片副本用普通数字保留注释对应关系。
+        printable = re.sub(r"[⁰¹²³⁴⁵⁶⁷⁸⁹]+", lambda match: "[" + match[0].translate(
+            str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")) + "]", markdown)
+        path = Path(await self.native_render(printable, return_url=False, **options))
         worker = asyncio.create_task(asyncio.to_thread(self._read, path))
         cancelled = False
         while not worker.done():
