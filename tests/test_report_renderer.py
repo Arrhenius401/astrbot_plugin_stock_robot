@@ -10,6 +10,22 @@ from stock_robot_plugin_test.report_renderer import ReportRenderer, ReportTooLar
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ready", [True, False])
+async def test_superscript_mode_is_consistent_and_preserves_units(tmp_path, ready):
+    path = tmp_path / "native.png"
+    Image.new("RGB", (20, 20)).save(path)
+    original = "正文⁶ 面积 m² 100m² 面积m² cm³\n| **表头¹⁰** | 表内⁹ |\n\n¹⁰ 注释"
+    expected = original if ready else "正文[6] 面积 m² 100m² 面积m² cm³\n| **表头[10]** | 表内[9] |\n\n[10] 注释"
+
+    async def native(markdown, **kwargs):
+        assert markdown == expected
+        return str(path)
+
+    await ReportRenderer(native, fonts_ready=lambda: ready).render(original)
+    assert "表头¹⁰" in original and "正文⁶" in original
+
+
+@pytest.mark.asyncio
 async def test_native_call_preserves_markdown_and_cleans_image(tmp_path):
     path = tmp_path / "native.jpg"
     Image.new("RGB", (80, 100), "white").save(path)

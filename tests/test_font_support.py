@@ -1,5 +1,6 @@
 """字体安装不得覆盖、缺字诊断及失败隔离。"""
 
+import hashlib
 import logging
 import struct
 from concurrent.futures import ThreadPoolExecutor
@@ -18,7 +19,7 @@ def test_install_real_font_and_reload_preserves_file(tmp_path, caplog):
     assert target.stat().st_mtime_ns == before.st_mtime_ns
     assert not fonts.missing_characters(target)
     assert ImageFont.truetype(str(target), 25).getbbox("中文") is not None
-    assert list(target.parent.iterdir()) == [target]
+    assert {p.name for p in target.parent.iterdir()} == {"font.ttf", "font-bold.ttf"}
 
 
 def test_existing_corrupt_font_is_never_replaced(tmp_path, caplog):
@@ -88,4 +89,40 @@ def test_concurrent_install_publishes_only_complete_font(tmp_path):
     with ThreadPoolExecutor(2) as pool:
         list(pool.map(lambda _: fonts.ensure_chinese_font(tmp_path), range(2)))
     assert (tmp_path / "font.ttf").read_bytes() == fonts.FONT_SOURCE.read_bytes()
-    assert list(tmp_path.iterdir()) == [tmp_path / "font.ttf"]
+    assert {p.name for p in tmp_path.iterdir()} == {"font.ttf", "font-bold.ttf"}
+
+
+def test_known_regular_upgrade_backs_up_and_requires_restart(tmp_path):
+    original = fonts.FONT_SOURCE.with_name("NotoSansCJKsc-Regular.otf").read_bytes()
+    (tmp_path / "font.ttf").write_bytes(original)
+    fonts.ensure_chinese_font(tmp_path)
+    assert (tmp_path / "font.ttf").read_bytes() == fonts.FONT_SOURCE.read_bytes()
+    assert next(iter(tmp_path.glob("*.bak"))).read_bytes() == original
+    assert not fonts.superscripts_available(tmp_path)
+    # 模拟下次进程启动，覆盖两套实际字体一起检查的路径。
+    fonts._RESTART_REQUIRED.discard(str(tmp_path.resolve()))
+    assert fonts.superscripts_available(tmp_path)
+    (tmp_path / "font-bold.ttf").unlink()
+    assert not fonts.superscripts_available(tmp_path)
+
+
+def test_known_bold_upgrade_is_backed_up_by_full_hash(tmp_path, monkeypatch):
+    (tmp_path / "font.ttf").write_bytes(fonts.FONT_SOURCE.read_bytes())
+    original = b"known managed bold bytes"
+    digest = hashlib.sha256(original).hexdigest()
+    monkeypatch.setitem(fonts._OLD_HASHES, "font-bold.ttf", digest)
+    target = tmp_path / "font-bold.ttf"
+    target.write_bytes(original)
+    fonts.ensure_chinese_font(tmp_path)
+    assert target.read_bytes() == fonts.BOLD_FONT_SOURCE.read_bytes()
+    assert target.with_name(f"font-bold.ttf.stock-robot-{digest}.bak").read_bytes() == original
+
+
+def test_unknown_valid_bold_is_preserved_and_entire_report_falls_back(tmp_path):
+    (tmp_path / "font.ttf").write_bytes(fonts.FONT_SOURCE.read_bytes())
+    original = fonts.FONT_SOURCE.with_name("NotoSansCJKsc-Regular.otf").read_bytes()
+    (tmp_path / "font-bold.ttf").write_bytes(original)
+    fonts.ensure_chinese_font(tmp_path)
+    assert (tmp_path / "font-bold.ttf").read_bytes() == original
+    assert not list(tmp_path.glob("*.bak"))
+    assert not fonts.superscripts_available(tmp_path)

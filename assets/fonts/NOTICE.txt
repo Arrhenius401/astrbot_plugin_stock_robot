@@ -9,3 +9,16 @@ https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChi
 
 SHA-256：
 Regular: 2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b
+
+衍生字体 Stock Robot CJK Regular / Bold：
+保留原字体版权和 OFL，新增六个上标字符，并更改衍生字体名称。
+补字来自各字重自身的 0/5/6/7/8/9 轮廓，缩放 60%、上移 441 UPM；
+advance、纵向度量参照同字重现有 ¹。复用未映射且无布局引用的 CID 槽，不新增字形数。
+完整输入和输出 SHA-256 见 superscript-hashes.json。
+
+粗体输入为用户本地已知哈希文件，原始来源未由插件 Git 历史确认：
+Bold: b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a
+
+复现（开发环境需 fontTools 4.65.0；视觉验证用 Pillow 12.3.0）：
+python scripts/build_superscript_fonts.py --regular assets/fonts/NotoSansCJKsc-Regular.otf --bold <原始粗体本地路径>
+禁止以衍生字体作为源输入。构建保留源时间戳，输出哈希应与清单一致。

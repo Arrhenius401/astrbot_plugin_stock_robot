@@ -1,0 +1,10 @@
+{
+  "Regular": {
+    "source_sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+    "sha256": "1aa9b25e91ba8ba42edac9d3ca187f37a35509a70ba72af4dcb697180ad92484"
+  },
+  "Bold": {
+    "source_sha256": "b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a",
+    "sha256": "4ba5a49137a6965e3eafd51e4c3072802fe61e63cfbe1ca75f7dba0b33fa48ec"
+  }
+}

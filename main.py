@@ -34,7 +34,7 @@ from .client import (
     resolve_effective_timeout,
 )
 from .disk_support import FileLock
-from .font_support import ensure_chinese_font
+from .font_support import ensure_chinese_font, superscripts_available
 from .launcher import ServiceLauncher
 from .pending_queue import PendingQueue, canonical_symbol, normalize_index_query
 from .plugin_settings import migrate_port, resolve_legacy_extras
@@ -149,7 +149,7 @@ class StockRobotPlugin(Star):
         self._storage = ReportStorage(data_dir)
         self._delivery = ReportDelivery(
             data_dir / "delivery_tmp",
-            ReportRenderer(_render_report),
+            ReportRenderer(_render_report, fonts_ready=lambda: superscripts_available(Path(get_astrbot_data_path()))),
             storage=self._storage,
             send_message=getattr(context, "send_message", None),
         )
