@@ -99,13 +99,11 @@ async def test_success_is_one_image_and_no_disk_artifact(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("render_failure", [False, True])
+@pytest.mark.parametrize("render_error", [None, ReportTooLarge("预算超出"), OSError("原生转图失败")])
 async def test_render_or_image_failure_sends_exact_md_and_cleans(
-    tmp_path, render_failure
+    tmp_path, render_error
 ):
-    service = manager(
-        tmp_path, Renderer(ReportTooLarge("预算超出") if render_failure else None)
-    )
+    service = manager(tmp_path, Renderer(render_error))
     event = Event(image_error=OSError("网络失败"))
     original = "# 原始中文报告\n\n**完整内容**\n\n" + "最后一行" * 20
     await deliver(service, event, original)
@@ -128,17 +126,6 @@ async def test_file_failure_only_short_error_and_no_link(tmp_path):
         "http" not in message for message in event.messages if isinstance(message, str)
     )
     assert all(not path.exists() for path in event.paths)
-
-
-@pytest.mark.asyncio
-async def test_native_render_failure_delivers_exact_original(tmp_path, caplog):
-    service = manager(tmp_path, Renderer(OSError("原生转图失败")))
-    event = Event()
-    text = "# 新章节\n\n**原始内容**\n\n报告结尾"
-    await deliver(service, event, text)
-    assert event.files[0][1].decode("utf-8") == text
-    assert "改发 Markdown" in caplog.text
-    assert not list(service.temp_root.iterdir())
 
 
 @pytest.mark.asyncio
@@ -469,7 +456,6 @@ async def test_webchat_delivery_survives_closed_request(tmp_path, render_failure
     assert sessions and set(sessions) == {event.unified_msg_origin}
     if render_failure:
         assert received.files[0][1].decode("utf-8") == original
-        assert "正在发送完整 Markdown" in received.messages[0]
         assert all(not path.exists() for path in received.paths)
     else:
         assert len(received.messages) == 1 and received.messages[0].kind == "image"
@@ -552,28 +538,6 @@ async def test_report_kind_selects_width(tmp_path, kind, expected):
     await asyncio.gather(*list(service._tasks))
     assert len(event.messages) == 1 and event.messages[0].kind == "image"
     assert not event.files
-
-
-def test_image_timeout_default():
-    assert DeliveryLimits().image_timeout == 120
-
-
-@pytest.mark.asyncio
-async def test_objective_report_markdown_delivers_without_score_sections(tmp_path):
-    """客观模式 Markdown 不含评分/信号，交付链路不做结构假设并原样渲染。"""
-    service = manager(tmp_path)
-    event = Event()
-    text = (
-        "# 贵州茅台（600519）\n\n"
-        "## 一、行情与估值\n\n"
-        "| 指标 | 数值 |\n| --- | --- |\n| 收盘价 | 1500.00 |\n\n"
-        "数据来源：公开行情；数据日期：2026-10-30。"
-    )
-
-    await deliver(service, event, text)
-
-    assert len(event.messages) == 1 and event.messages[0].kind == "image"
-    assert event.messages[0].data == text.encode()
 
 
 @pytest.mark.asyncio

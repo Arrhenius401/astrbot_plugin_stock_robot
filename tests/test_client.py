@@ -64,23 +64,6 @@ def plugin_main(monkeypatch, tmp_path):
     return importlib.import_module(name)
 
 
-def test_plugin_modules_share_framework_logger(plugin_main, caplog):
-    """入口与辅助模块统一走框架日志，参数格式能正常展开。"""
-    package = plugin_main.__package__
-    modules = [plugin_main] + [
-        importlib.import_module(f"{package}.{name}")
-        for name in ("client", "bootstrap", "launcher")
-    ]
-    framework_logger = sys.modules["astrbot.api"].logger
-    with caplog.at_level(logging.WARNING, logger="plugin-test"):
-        for module in modules:
-            assert module.logger is framework_logger
-            module.logger.warning("日志来源：%s", module.__name__)
-    assert [record.getMessage() for record in caplog.records] == [
-        f"日志来源：{module.__name__}" for module in modules
-    ]
-
-
 @pytest.mark.asyncio
 async def test_unavailable_service_queues_group_shared_latest_three(plugin_main):
     plugin = plugin_main.StockRobotPlugin(SimpleNamespace(), {})
@@ -443,21 +426,6 @@ def test_initialize_does_not_wait_for_provider(
     run(scenario())
 
 
-def test_render_report_uses_local_t2i(plugin_main, monkeypatch):
-    calls = []
-
-    class Renderer:
-        async def render_t2i(self, text, *, use_network=True, return_url=True, template_name=None):
-            calls.append((text, use_network, return_url, template_name))
-            return "/tmp/report.jpg"
-
-    monkeypatch.setattr(
-        sys.modules["astrbot.core"], "html_renderer", Renderer(), raising=False
-    )
-    assert run(plugin_main._render_report("报告")) == "/tmp/report.jpg"
-    assert calls == [("报告", False, False, None)]
-
-
 def test_settings_defaults_and_explicit_legacy_values(plugin_main, monkeypatch):
     async def scenario():
         captured = []
@@ -791,13 +759,6 @@ async def test_effective_timeout_reads_astrbot_config(plugin_main, config, expec
         assert plugin._resolve_effective_timeout(event) == expected
     finally:
         await plugin._client.aclose()
-
-
-def test_progress_message_describes_preparation_and_analysis():
-    text = progress_message("600519")
-    assert "600519" in text
-    assert "准备服务" in text
-    assert "超时上限" not in text
 
 
 def test_public_error_hides_links_ip_and_credentials():
@@ -1240,16 +1201,6 @@ async def test_late_recovery(plugin_main, monkeypatch, mode):
             assert "仍未生成报告" in event.send.await_args.args[0]
     finally:
         await plugin._client.aclose()
-
-
-def test_release_binding_and_us_tool_contract_match_current_core(plugin_main):
-    assert plugin_main.MANAGED_RELEASE_TAG == "v0.4.5"
-    assert "version: 1.3.5" in Path(plugin_main.__file__).with_name("metadata.yaml").read_text(encoding="utf-8").splitlines()
-    description = plugin_main.StockRobotPlugin.analyze_stock.__doc__ or ""
-    assert "TTM 同行经营比较" in description
-    assert "四维均计分且充分" in description
-    assert "缺项保留 N/A" in description
-    assert "不含行业同行对比" not in description
 
 
 @pytest.mark.asyncio

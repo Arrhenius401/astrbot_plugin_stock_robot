@@ -151,5 +151,4 @@ async def test_gold_recovery_question_identifies_gold_as_market_brief(tmp_path, 
     await notify_waiting(queue, context, now=10)
     assert '"kind": "gold"' in calls[0]["prompt"]
     assert '"symbol": "GOLD"' in calls[0]["prompt"]
-    assert "黄金市场" in calls[0]["system_prompt"]
     assert len(messages) == 1

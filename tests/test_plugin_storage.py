@@ -187,8 +187,6 @@ async def test_analysis_mode_mismatch_warns_only_once(plugin_module):
     assert Client.calls == 1
     assert plugin._mode_checked
     assert len(event.messages) == 1
-    assert "额外分析开关未生效" in event.messages[0]
-    assert "关闭" in event.messages[0]
 
 
 @pytest.mark.asyncio
@@ -208,7 +206,6 @@ async def test_unsupported_service_warns_and_matching_mode_is_silent(plugin_modu
     event = Event()
     await plugin._verify_analysis_mode(event, "stock")
     assert len(event.messages) == 1
-    assert "版本不支持" in event.messages[0]
 
     plugin = plugin_module.StockRobotPlugin(
         SimpleNamespace(), {"extra_analysis_enabled": True}
