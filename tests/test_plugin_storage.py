@@ -39,7 +39,7 @@ def plugin_module(monkeypatch, tmp_path):
     name = "stock_robot_plugin_test.main"
     monkeypatch.delitem(sys.modules, name, raising=False)
     module = importlib.import_module(name)
-    monkeypatch.setattr(module, "ensure_chinese_font", lambda path: None)
+    monkeypatch.setattr(module, "ensure_chinese_font", lambda path, **kw: None)
 
     class Launcher:
         def __init__(self, **kwargs):

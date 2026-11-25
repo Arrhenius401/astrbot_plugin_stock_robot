@@ -23,11 +23,15 @@ class RenderedReport:
 
 class ReportRenderer:
     def __init__(self, native_render: Callable[..., Awaitable[str]],
-                 fonts_ready: Callable[[], bool] | None = None):
+                 fonts_ready: Callable[[], bool] | None = None,
+                 chinese_ready: Callable[[], bool] | None = None):
         self.native_render = native_render
         self.fonts_ready = fonts_ready or (lambda: False)
+        self.chinese_ready = chinese_ready or (lambda: True)
 
     async def render(self, markdown: str, *, width: int = 800) -> RenderedReport:
+        if not self.chinese_ready():
+            raise RuntimeError("中文字体不可用，改为交付完整 Markdown 文件")
         options = {"width": width} if width != 800 else {}
         # 原生中文字体不覆盖全部 Unicode 上标，图片副本用普通数字保留注释对应关系。
         def fallback(match: re.Match[str]) -> str:

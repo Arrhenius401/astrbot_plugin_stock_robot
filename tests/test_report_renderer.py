@@ -132,3 +132,11 @@ async def test_superscripts_render_as_font_safe_matching_notes(tmp_path):
 
     await ReportRenderer(native).render(original)
     assert "分位¹⁰" in original
+
+
+@pytest.mark.asyncio
+async def test_unavailable_chinese_font_skips_image_rendering():
+    async def native(*args, **kwargs):
+        pytest.fail("缺少中文字体时不应生成图片")
+    with pytest.raises(RuntimeError, match="Markdown"):
+        await ReportRenderer(native, chinese_ready=lambda: False).render("完整报告")

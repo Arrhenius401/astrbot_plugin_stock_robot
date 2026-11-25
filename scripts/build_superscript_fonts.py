@@ -84,9 +84,9 @@ def build(source: Path, target: Path, style: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--regular", type=Path, default=Path("assets/fonts/NotoSansCJKsc-Regular.otf"))
+    parser.add_argument("--regular", type=Path, default=Path(".cache/font-fixtures/NotoSansCJKsc-Regular.otf"))
     parser.add_argument("--bold", type=Path, required=True)
-    parser.add_argument("--output", type=Path, default=Path("assets/fonts"))
+    parser.add_argument("--output", type=Path, default=Path(".cache/font-fixtures"))
     args = parser.parse_args()
     manifest = {style: build(source, args.output / f"StockRobotCJK-{style}.otf", style)
                 for style, source in (("Regular", args.regular), ("Bold", args.bold))}

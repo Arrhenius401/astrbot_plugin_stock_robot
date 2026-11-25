@@ -1,6 +1,6 @@
 Noto Sans CJK SC Regular
 
-原始字体来自 notofonts/noto-cjk，随插件原样分发，许可证见 OFL.txt。
+原始字体来自 notofonts/noto-cjk，随插件原样分发作为离线托底，许可证见 OFL.txt。
 版权信息保留在字体文件的 name 表中。
 
 来源：
@@ -20,5 +20,12 @@ advance、纵向度量参照同字重现有 ¹。复用未映射且无布局引�
 Bold: b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a
 
 复现（开发环境需 fontTools 4.65.0；视觉验证用 Pillow 12.3.0）：
-python scripts/build_superscript_fonts.py --regular assets/fonts/NotoSansCJKsc-Regular.otf --bold <原始粗体本地路径>
+python scripts/build_superscript_fonts.py --regular .cache/font-fixtures/NotoSansCJKsc-Regular.otf --bold <原始粗体本地路径>
 禁止以衍生字体作为源输入。构建保留源时间戳，输出哈希应与清单一致。
+
+在线分发：运行时下载固定提交 395f4ca95eb365f9f33266ad54261d46943b96d1 下的两份完整衍生字体，校验 superscript-hashes.json 对应摘要。
+发布包保留原始 Regular 作为离线托底、OFL 和哈希清单，不包含两份大型衍生字体。
+下载顺序：ghfast、jsDelivr、GitHub 直连；全部来源均须匹配固定哈希。
+托底时同一 Regular 兼任两种字重，部分脚注上标由插件转换为 [数字]；下载成功并重启后恢复修复版效果。
+开发测试：python scripts/prepare_font_fixtures.py；资源保存在 .cache/font-fixtures/。
+构建默认输出也位于该目录，不进入发布包。生成其他输出后须核对哈希。

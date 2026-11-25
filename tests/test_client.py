@@ -386,6 +386,12 @@ def test_initialize_does_not_wait_for_provider(
 ):
     async def scenario():
         started = []
+        import threading
+        downloading = threading.Event()
+        def wait_for_stop(path, *, stop):
+            downloading.set()
+            assert stop.wait(3), "terminate 应停止字体后台任务"
+        monkeypatch.setattr(plugin_main, "ensure_chinese_font", wait_for_stop)
 
         class Launcher:
             def __init__(self, **kwargs):
@@ -413,12 +419,12 @@ def test_initialize_does_not_wait_for_provider(
         try:
             await plugin.initialize()
             assert started == [True]
+            await asyncio.sleep(0)
             if font_path_failure:
                 assert "无法准备 AstrBot 中文字体" in caplog.text
             else:
-                assert (
-                    Path(plugin_main.get_astrbot_data_path()) / "font.ttf"
-                ).is_file()
+                assert await asyncio.to_thread(downloading.wait, 1)
+                assert not plugin._font_task.done()
             assert plugin._delivery.renderer.native_render == plugin_main._render_report
         finally:
             await plugin.terminate()
@@ -441,7 +447,7 @@ def test_settings_defaults_and_explicit_legacy_values(plugin_main, monkeypatch):
                 return None
 
         monkeypatch.setattr(plugin_main, "ServiceLauncher", Launcher)
-        monkeypatch.setattr(plugin_main, "ensure_chinese_font", lambda _: None)
+        monkeypatch.setattr(plugin_main, "ensure_chinese_font", lambda _, **kw: None)
         for config, timeout in [({}, 1800),
                 ({"cleanup_previous_reports": False, "install_timeout_seconds": 2400,
                   "auto_install": False, "service_port": 18080}, 2400)]:
