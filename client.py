@@ -74,7 +74,7 @@ def resolve_effective_timeout(config_timeout: int, tool_timeout: int | None) -> 
 
 def progress_message(symbol: str) -> str:
     """提示服务准备和分析正在进行。"""
-    return f"⏳ 正在准备服务并分析 {symbol}，请稍候。首次分析通常需要 30～150 秒。"
+    return f"⏳ 正在分析 {symbol}，请稍候。首次分析通常需要 30～150 秒。"
 
 
 def public_error_detail(value: str) -> str:
@@ -492,6 +492,9 @@ class StockRobotClient:
                     f"❌ 无法识别指数 {symbol}，请提供 A 股六位指数代码或主仓目录中的港股指数代码。"
                     + public_error_detail(self._error_detail(resp)),
                 )
+            detail = self._error_detail(resp)
+            if isinstance(detail, str) and detail.strip() and not detail.startswith("无效的股票代码"):
+                return AnalyzeOutcome(False, f"❌ 分析未完成 {symbol}：{public_error_detail(detail)}")
             return AnalyzeOutcome(
                 False,
                 f"❌ 无法识别代码 {symbol}，请提供 A 股 6 位代码（如 600519）、"

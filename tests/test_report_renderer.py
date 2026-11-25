@@ -10,6 +10,22 @@ from stock_robot_plugin_test.report_renderer import ReportRenderer, ReportTooLar
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ready", [True, False])
+async def test_superscript_mode_is_consistent_and_preserves_units(tmp_path, ready):
+    path = tmp_path / "native.png"
+    Image.new("RGB", (20, 20)).save(path)
+    original = "正文⁶ 面积 m² 100m² 面积m² cm³\n| **表头¹⁰** | 表内⁹ |\n\n¹⁰ 注释"
+    expected = original if ready else "正文[6] 面积 m² 100m² 面积m² cm³\n| **表头[10]** | 表内[9] |\n\n[10] 注释"
+
+    async def native(markdown, **kwargs):
+        assert markdown == expected
+        return str(path)
+
+    await ReportRenderer(native, fonts_ready=lambda: ready).render(original)
+    assert "表头¹⁰" in original and "正文⁶" in original
+
+
+@pytest.mark.asyncio
 async def test_native_call_preserves_markdown_and_cleans_image(tmp_path):
     path = tmp_path / "native.jpg"
     Image.new("RGB", (80, 100), "white").save(path)
@@ -102,3 +118,25 @@ async def test_gold_width_reaches_native_renderer(tmp_path):
     result = await ReportRenderer(native).render("黄金原文", width=1200)
     assert result.width == 1200
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_superscripts_render_as_font_safe_matching_notes(tmp_path):
+    path = tmp_path / "report.png"
+    Image.new("RGB", (80, 100), "white").save(path)
+    original = "| 量比⁵ | PE⁶ | 分位¹⁰ |\n⁵ 说明\n⁶ 说明\n¹⁰ 说明"
+
+    async def native(markdown, return_url):
+        assert markdown == "| 量比[5] | PE[6] | 分位[10] |\n[5] 说明\n[6] 说明\n[10] 说明"
+        return str(path)
+
+    await ReportRenderer(native).render(original)
+    assert "分位¹⁰" in original
+
+
+@pytest.mark.asyncio
+async def test_unavailable_chinese_font_skips_image_rendering():
+    async def native(*args, **kwargs):
+        pytest.fail("缺少中文字体时不应生成图片")
+    with pytest.raises(RuntimeError, match="Markdown"):
+        await ReportRenderer(native, chinese_ready=lambda: False).render("完整报告")

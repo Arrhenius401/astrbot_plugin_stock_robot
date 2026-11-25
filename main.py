@@ -9,6 +9,7 @@ import time
 from copy import copy
 from functools import partial
 from pathlib import Path
+from threading import Event
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -34,7 +35,11 @@ from .client import (
     resolve_effective_timeout,
 )
 from .disk_support import FileLock
-from .font_support import ensure_chinese_font
+from .font_support import (
+    chinese_fonts_available,
+    ensure_chinese_font,
+    superscripts_available,
+)
 from .launcher import ServiceLauncher
 from .pending_queue import PendingQueue, canonical_symbol, normalize_index_query
 from .plugin_settings import migrate_port, resolve_legacy_extras
@@ -45,7 +50,7 @@ from .service_settings import SyncOutcome, sync_service_settings
 from .waiting_messages import SessionEvent, generate_text, notification_loop
 
 # 每个插件版本固定绑定已完成兼容验收的主仓正式标签，不追随开发分支或 latest。
-MANAGED_RELEASE_TAG = "v0.4.2"
+MANAGED_RELEASE_TAG = "v0.4.6"
 
 
 LATE_REPORT_WAIT_SECONDS = 120
@@ -149,7 +154,8 @@ class StockRobotPlugin(Star):
         self._storage = ReportStorage(data_dir)
         self._delivery = ReportDelivery(
             data_dir / "delivery_tmp",
-            ReportRenderer(_render_report),
+            ReportRenderer(_render_report, fonts_ready=lambda: superscripts_available(Path(get_astrbot_data_path())),
+                           chinese_ready=lambda: chinese_fonts_available(Path(get_astrbot_data_path()))),
             storage=self._storage,
             send_message=getattr(context, "send_message", None),
         )
@@ -173,6 +179,8 @@ class StockRobotPlugin(Star):
         self._client = StockRobotClient(base_url, self._timeout_seconds, cache_path=data_dir / "index-identities.json")
         self._pending = PendingQueue(data_dir / "waiting.sqlite3")
         self._waiting_lock = FileLock(data_dir / "waiting-worker.lock")
+        self._font_stop = Event()
+        self._font_task: asyncio.Task | None = None
         self._waiting_task: asyncio.Task | None = None
         self._batch_tasks: dict[str, asyncio.Task] = {}
         self._data_dir = data_dir
@@ -184,12 +192,7 @@ class StockRobotPlugin(Star):
     async def initialize(self):
         """准备任务由 launcher 持有，插件加载立即返回。"""
         data_dir = Path(get_astrbot_plugin_data_path()) / "astrbot_plugin_stock_robot"
-        try:
-            await asyncio.to_thread(ensure_chinese_font, Path(get_astrbot_data_path()))
-        except Exception as error:  # noqa: BLE001 — 路径/线程准备失败也不阻止插件加载
-            logger.warning(
-                "无法准备 AstrBot 中文字体: %s: %s", type(error).__name__, error
-            )
+        self._font_task = asyncio.create_task(self._prepare_fonts())
         progress = InstallProgress(data_dir / "service.log")
         self._launcher = ServiceLauncher(
             base_url=self._base_url,
@@ -219,6 +222,14 @@ class StockRobotPlugin(Star):
             lambda: self._launcher is not None and getattr(self._launcher, "state", "idle") == "ready",
             logger, worker_lock=self._waiting_lock, recover=self._recover_batches,
         ))
+
+    async def _prepare_fonts(self):
+        try:
+            await asyncio.to_thread(
+                ensure_chinese_font, Path(get_astrbot_data_path()), stop=self._font_stop,
+            )
+        except Exception as error:  # noqa: BLE001 — 不阻止服务启动
+            logger.warning("无法准备 AstrBot 中文字体: %s: %s", type(error).__name__, error)
 
     def _sync_service_settings(self, data_dir: Path, instance: Path):
         """服务启动前同步插件开关；只有自建服务会走到这里。"""
@@ -274,6 +285,9 @@ class StockRobotPlugin(Star):
     async def terminate(self):
         """先回收任务和自建服务，HTTP 客户端始终关闭。"""
         self._stopping = True
+        self._font_stop.set()
+        if self._font_task is not None:
+            await asyncio.gather(self._font_task, return_exceptions=True)
         if self._waiting_task is not None:
             self._waiting_task.cancel()
             await asyncio.gather(self._waiting_task, return_exceptions=True)
@@ -753,7 +767,7 @@ class StockRobotPlugin(Star):
         def remaining() -> int:
             return max(1, int(deadline - asyncio.get_running_loop().time()))
 
-        message = ("⏳ 正在准备服务并分析黄金市场，请稍候。"
+        message = ("⏳ 正在分析黄金市场，请稍候。"
                    if kind == "gold" else progress_message(symbol))
         await event.send(event.plain_result(message))
 

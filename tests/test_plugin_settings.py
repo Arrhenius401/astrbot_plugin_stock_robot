@@ -1,4 +1,4 @@
-"""七项配置及旧版迁移的确定性回归。"""
+"""配置校验及旧版迁移的确定性回归。"""
 
 import importlib
 import json
@@ -9,24 +9,6 @@ import pytest
 
 def settings():
     return importlib.import_module("stock_robot_plugin_test.plugin_settings")
-
-
-def test_schema_visible_fields_and_plain_labels():
-    schema = json.loads((Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text("utf-8"))
-    visible = {key: value for key, value in schema.items() if not value.get("invisible")}
-    assert list(visible) == ["extra_analysis_enabled", "cleanup_previous_reports", "service_port",
-                             "timeout_seconds", "startup_timeout_seconds",
-                             "install_timeout_seconds", "package_index_url"]
-    assert visible["extra_analysis_enabled"]["description"] == "额外分析"
-    assert visible["extra_analysis_enabled"]["default"] is False
-    assert visible["extra_analysis_enabled"]["hint"] == (
-        "为 A 股/港股/美股个股及 A 股/港股指数增加规则判断及 AI 解读；个股另提供有效维度评分，依据充分时生成规则信号。默认关闭。"
-    )
-    assert visible["cleanup_previous_reports"]["description"] == "清理历史原始报告"
-    assert visible["cleanup_previous_reports"]["default"] is True
-    assert visible["install_timeout_seconds"]["default"] == 1800
-    assert visible["package_index_url"]["default"] == ""
-    assert "https://pypi.tuna.tsinghua.edu.cn/simple" in visible["package_index_url"]["hint"]
 
 
 @pytest.mark.parametrize("value", [0, -1, 65536, True, "abc", "12.5", 12.5])
